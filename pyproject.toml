@@ -1,0 +1,20 @@
+[project]
+name = "pcb-designer-tool"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "circuit-synth>=0.12.1",
+]
+
+[dependency-groups]
+dev = [
+    "pillow>=12.3.0",
+    "pytest>=8.0",
+    "reportlab>=5.0.0",
+    "svglib>=2.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]

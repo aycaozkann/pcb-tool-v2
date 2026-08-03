@@ -1,0 +1,14 @@
+{
+  "foldHeading": true,
+  "foldIndent": true,
+  "showLineNumber": true,
+  "spellcheck": false,
+  "attachmentFolderPath": "DOCS/assets",
+  "promptDelete": false,
+  "alwaysUpdateLinks": true,
+  "newFileLocation": "current",
+  "useMarkdownLinks": true,
+  "showUnsupportedFiles": false,
+  "readableLineLength": true,
+  "strictLineBreaks": true
+}

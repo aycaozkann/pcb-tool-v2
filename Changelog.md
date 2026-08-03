@@ -1,0 +1,316 @@
+# Değişiklik Günlüğü
+
+*Kapsam: `pcb-tool-v2`*
+
+> Bu dosya `degisiklik_gunlugu_uret.py` ile git geçmişinden OTOMATİK üretilir — elle düzenleme bir sonraki üretimde KAYBOLUR. Değişiklik commit mesajında yapılmalı.
+
+## 2026-07-31
+
+- **d567fb5** Ajanlar arası HANDOVER.md protokolü kuruldu (schematic-design -> pcb-layout) — *aycaozkann*
+  - Mevcut hiçbir kural silinmedi/değiştirilmedi, sadece eklendi:
+  - - schematic-design SKILL.md: yeni Faz 5 - HANDOVER.md üretimi zorunluluğu
+  - (komponent kümeleri, aggressor/victim hatlar, yüksek akım netleri).
+  - - pcb-layout SKILL.md: Faz 1'den ÖNCE HANDOVER.md okuma zorunluluğu,
+  - uyulamıyorsa NEEDS_HUMAN.
+  - - MASTER_RULEBOOK.md FAZ 3: HANDOVER.md üretilmeden PCB fazına
+  - geçilemeyeceği kuralı eklendi.
+- **5d81637** MASTER_RULEBOOK + 03_Design_Rules: Phase Matching, Via Stub ve HV Creepage kuralları eklendi — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi/değiştirilmedi, sadece eklendi:
+  - - FAZ 7: diferansiyel faz uyumu (bump/uncoupled length), via stub
+  - minimizasyonu (backdrilling), yüksek voltaj creepage/isolation slot.
+  - - 03_Design_Rules.md §4b: HV_NetClass clearance kontrol maddesi.
+- **3d68275** Otonom Git versiyon kontrol + rollback altyapısı eklendi — *aycaozkann*
+  - Mevcut hiçbir kural silinmedi/değiştirilmedi, sadece eklendi:
+  - - .gitignore: KiCad yedek/geçici dosya kuralları (*.bak, *-backups/,
+  - _autosave-*, temp_gerbers/ vb.)
+  - - .gitattributes: *.step binary eklendi (kicad_sch/pcb/pro text ve
+  - gbr/drl/pdf binary kuralları zaten mevcuttu, daha kapsamlı haliyle)
+  - - MASTER_RULEBOOK.md FAZ -0.5 (yeni): 4 dönüm noktasında otonom
+  - git commit zorunluluğu + rollback stratejisi (git checkout/reset --hard)
+  - git init ÇALIŞTIRILMADI: pcb-tool-v2 zaten üst dizindeki (pcb-designer-tool)
+  - git deposunun bir parçası - burada git init çalıştırmak iç içe/bozuk bir
+  - repo yapısı yaratırdı, gereksiz ve riskli olurdu.
+- **285c2fc** DOCS: SMT/dizgi fabrikası fiziksel DFM/DFA + Release Checklist kısıtları eklendi — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi/değiştirilmedi, sadece eklendi:
+  - - 04_DFM_and_DFA.md §3: Global/Local fiducial, konveyör edge clearance/
+  - tooling holes/breakaway rails, V-cut/mouse-bite MLCC 2mm keepout.
+  - - 04_DFM_and_DFA.md §4b (yeni): Silkscreen vs Mask - serigrafi çıplak
+  - bakır/pad üzerine binemez.
+  - - 05_Release_Checklist.md §5: CPL/Centroid ve Polarite Kontrolü
+  - (Tape&Reel yönü + Pin1/Katot işareti okunabilirliği).
+- **b1e24da** TASARIM_AKISI + CLAUDE.md: Termal/Güç algoritma görev tanımları eklendi (henüz kod yazılmadı) — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi, sadece görev tanımı olarak eklendi:
+  - - Adım 8: pcb_stackup_planner.py için IPC-2152 akım/ΔT hesabı görevi,
+  - mekanik_dxf_koprusu.py için Termal Keepout Zone görevi.
+  - - Adım 5: yeni derating_calculator modülü görevi (FAZ 1.5 EE Derating
+  - Filtresi'nin kod karşılığı).
+  - - CLAUDE.md: mekanik_dxf_koprusu.py girdisine bu henüz UYGULANMAMIŞ
+  - görevin notu eklendi (dürüstlük notu — sadece görev tanımı, kod değil).
+- **6bbaea6** MASTER_RULEBOOK: FAZ 1.5 - Bileşen Seçimi ve EE Derating Filtresi eklendi — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi/değiştirilmedi, FAZ 1 ile FAZ 2 arasına
+  - yeni bölüm eklendi: kapasitör voltaj/dielektrik (X7R/X5R, C0G/NP0,
+  - Y5V/Z5U yasağı), direnç %50 power derating, bobin Isat +%30 payı,
+  - tolerans öncelikleri (analog %1, dijital pull-up/down %5).
+- **64bea40** MASTER_RULEBOOK + pcb-layout SKILL: EE (elektromanyetik/termal/PI) kuralları eklendi — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi/değiştirilmedi, sadece eklendi:
+  - - FAZ 4: termal yönetim/isı izolasyonu (termal via matrisi) kuralı
+  - - FAZ 6: PI/parazitik endüktans minimizasyonu + analog/dijital GND
+  - izolasyonu (moating/star grounding) kuralları
+  - - pcb-layout Faz 4 Öncelik 4: analog/dijital paralel routing yasağı +
+  - sadece 90 derece kesişim kuralı
+- **111eec0** MASTER_RULEBOOK + dft-testpoints SKILL: DFM/DFT fiziksel üretim kuralları eklendi — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi/değiştirilmedi, sadece eklendi:
+  - - FAZ 4: komponent gölgelemesi (shadowing) / dalga lehimi kuralı
+  - - FAZ 7: bakır dengesi (copper thieving/hatched) ile warping önlemi
+  - - dft-testpoints Faz B + kabul kriterleri: ICT bed-of-nails min 1.27mm
+  - (tercihen 2.54mm) TP aralığı + tek katman (tercihen B.Cu) kuralı
+- **04a1091** MASTER_RULEBOOK + pcb-layout SKILL: Saat sinyali (Clock) ve CDC kuralları eklendi — *aycaozkann*
+  - Mevcut hiçbir madde silinmedi/değiştirilmedi, sadece eklendi:
+  - - FAZ 2: Dedicated Clock Pins zorunluluğu + seri sonlandırma/empedans uyumu
+  - - FAZ 6: farklı clock domain'lerin paralel/üst üste yönlendirilmesi yasağı
+  - - pcb-layout Faz 4 Öncelik 2: CDC Crosstalk Yasağı eklendi
+- **ee7848f** pcb-tool-v2: Tam Otonom Kurtarma Mekanizması (araç çökmesi artık NEEDS_HUMAN nedeni değil) — *aycaozkann*
+  - MCP'nin route_trace timeout sonrası tamamen çökmesi (bu oturumda gerçekten
+  - yaşandı) bir daha "kullanıcı elle çizsin" ile sonuçlanmasın diye üç
+  - otomatik kurtarma katmanı eklendi:
+  - - otonom_kurtarma_motoru.py: izole_calistir() her pcbnew-yazma çağrısını
+  - subprocess sandboxing ile izole eder (segfault/timeout ana süreci
+  - düşürmez); bolumlu_yol_dene() uzun rotayı ~5mm parçalara bölüp her
+  - parçayı ayrı çözer (kısmi yol asla yazılmaz); otonom_routing_merdiveni()
+  - ikisini + akilli_yol_bul()'u tek çağrıda sırayla dener.
+  - - otonom_python_router.py: son çare ızgara tabanlı 8-yönlü A* router
+  - (saf Python, pcbnew'e dokunmaz), sadece düz PCB_TRACK segmentleri yazar
+  - (KiCad'in route_trace/PNS çekirdeği kullanılmaz).
+  - - topolojik_router_koprusu.py: _bulgu_uyumlu_iz_yaz() eklendi (izole
+  - alt süreçte JSON-serileştirilebilir parametrelerle çağrılabilmesi için).
+  - - CLAUDE.md: "araç çöktü" (otomatik kurtarma zorunlu) ile "aynı ihlal 3
+  - kez tekrarlıyor" (NEEDS_HUMAN) ayrımı Anayasa'ya eklendi.
+  - 32 yeni pytest testi (sandboxing + A* + segmentasyon, pcbnew gerekmeden
+  - gerçekten çalıştırıldı) + mevcut 744 test hâlâ yeşil.
+- **dff3ea0** pcb-tool-v2: JSON Çarpışma Radarı (pcb_carpisma_radari.py) entegre edildi — *aycaozkann*
+  - Yerleşim/routing doğruluğunu artık pcb_gorsel_kesit.py ile görsel
+  - bakarak değil, pcbnew.FOOTPRINT.GetBoundingBox() tabanlı deterministik
+  - bir JSON API (komponent-komponent çakışması + Edge.Cuts taşması, X/Y mm
+  - örtüşme + önerilen kaçış mesafesi) ile doğruluyoruz.
+  - - pcb_carpisma_radari.py: saf geometri katmanı pcbnew'e bağımlı değil
+  - (mcad_carpisma_koprusu.py'nin kanıtlanmış deseni), 18 pytest testiyle
+  - mock nesnelerle (gerçek pcbnew olmadan) doğrulandı.
+  - - pcb-layout SKILL.md: yeni Aşama 3.0b - placement/routing doğrulaması
+  - için pcb_gorsel_kesit.py YASAK, radar ZORUNLU. Görsel Denetim adımı
+  - sadece nitel/holistik son-bakışla sınırlandı.
+  - - CLAUDE.md 6. TUR + DOCS/00_Dashboard.md modül tablosu güncellendi.
+  - - DOCS/09_Referans_Tasarimlar/ESP32C3_SmartBand.md: güncel routing
+  - durumu yansıtıldı (2 unconnected kaldı, clearance 0 hata).
+- **21edd2a** HAFIZA: MCP backend tamamen çökünce elle S-expr kurtarma + çapraz ize dik mesafe hesabı dersleri kaydedildi — *aycaozkann*
+  - ESP32-C3 Smart Band'de U2 pin5/pin12'nin 3 clearance hatası çözülürken
+  - (1) MCP route_trace timeout sonrası backend'in tamamen ölüp
+  - open_project ile bile kurtarılamadığı görüldü — elle S-expr düzenleme
+  - + bağımsız kicad-cli DRC ile tamamlandı, (2) 45° çapraz bir ize olan
+  - mesafe kenar-hizalı sezgiyle değil doğru denklemle hesaplanınca iki
+  - farklı geometrili kısıt (pad köşesi + çapraz iz) aynı anda çözüldü.
+
+## 2026-07-30
+
+- **7728bff** pcb-tool-v2: ajana gerçek görme yeteneği — pcb_gorsel_kesit.py — *aycaozkann*
+  - kicad-cli SVG export (fit-to-board) -> svglib/reportlab (SVG->PDF) ->
+  - poppler pdftocairo (PDF->PNG) -> Pillow (mm-bazlı kırpma/büyütme) zinciriyle
+  - board'un istenen mm bölgesini gerçek bir PNG olarak üretir; Claude Code
+  - Read aracıyla bunu doğrudan görebilir. ESP32-C3 Smart Band oturumunda
+  - U2 (LGA-14, 0.5mm pitch) çevresinde koordinat-bazlı kör routing 4 kez
+  - başarısız olunca doğdu.
+  - Ayrıca: test_degisiklik_gunlugu_uret.py'nin daha önce yapılan ama bu
+  - repoya hiç commit edilmemiş git-kökü otomatik bulma düzeltmesi eklendi.
+  - 726 test yeşil (önceki 720 + yeni 6), regresyon yok.
+- **2f8667f** HAFIZA: U2 (LGA-14 0.5mm pitch) via yerleştirme zorluğu kaydedildi — otomatik routing bu sınıf parça için uygun değil — *aycaozkann*
+- **727afe0** HAFIZA: refill_zones aracı gerçekten çökmedi ama kendi 'kaydedilmedi' raporu yanlıştı — bağımsız doğrulama şart — *aycaozkann*
+- **b1dd512** pcb-tool-v2: HAFIZA — MCP canlı routing'te 3 gerçek hata sınıfı (kısa devre, yanlış iz silme, görünmeyen via'lar), ESP32-C3 Smart Band kartında yakalandı — *aycaozkann*
+- **cbb7478** pcb-tool-v2: opsiyonel araçlar — A* şematik router, via-stub kontrolü, kapı makbuzu sözleşmesi — *aycaozkann*
+  - Otonom akışa BAĞLANMADI (fail-safe entegrasyon) — mevcut sch_wire.py ve
+  - uretim_zinciri_koprusu.py kontrat kapıları birincil yöntem olmaya devam
+  - ediyor, aşağıdakiler elle çağrılan ek araçlar:
+  - - sch_route.py + rewire.py + wireify.py: sembol gövdelerinden kaçan A*
+  - pin-pine router; netlist eşitliğini kanıtlamadan yazmıyor (.bak geri alma).
+  - - via_stub.py: via stub rezonans kontrolü (projenin kendi dogrulama
+  - matrisinde "yazılması gereken, henüz yok" diye işaretliydi).
+  - - gate_receipt.py: SHA-256'ya bağlı, fault-injection zorunlu, genel amaçlı
+  - kapı makbuzu doğrulayıcı — mevcut parts.json/drc.json kapılarının
+  - YERİNE geçmiyor, bağımsız stdlib-only CLI.
+  - 720 test yeşil (önceki 667 + yeni 53), regresyon yok.
+- **7b1cfa1** pcb-tool-v2: Changelog.md'yi git geçmişinden yeniden üret — *aycaozkann*
+  - degisiklik_gunlugu_uret.py idempotent üretim disiplini gereği son commit'i yansıtacak şekilde güncellendi.
+- **6835671** pcb-tool-v2: IPC-A-610 DFA + EMI/EMC (3W/20H/stitching) kural motorları + Otonom-PCB-Ajani birleştirmesi — *aycaozkann*
+  - - sch_wire.py (Otonom-PCB-Ajani kaynaklı) sematik_wire_motoru.py'nin yerini
+  - aldı; Windows süreç algılama + kicad_cli_yolunu_bul düzeltmeleri taşındı.
+  - Eski dosya sematik_wire_motoru_old.py olarak korundu (deprecated).
+  - - uretim_zinciri_koprusu.py BÖLÜM 5: parts.json/drc.json kontrat kapıları
+  - (fail-open değil, her zaman diskten okur) + KiBotSonucu eksik dataclass
+  - başlığı regresyonu düzeltildi.
+  - - ipc_a_610_dfa_motoru.py: Pick-and-Place/Reflow SMD-SMD/SMD-THT/kenar
+  - minimum clearance hesaplayıcı + bulgu_sozlesmesi.Bulgu denetleyicisi.
+  - - emi_emc_kural_motoru.py: 3W crosstalk, 20H kenar ışıması, via-stitching
+  - (λ/20) hesaplayıcı + denetleyici.
+  - - ipc_dru_koprusu.py: uc_w_kuraline_cevir()/dfa_courtyard_kuraline_cevir()
+  - ile iki motor .kicad_dru Custom Rules çıktısına bağlandı.
+  - - DOCS/04_DFM_and_DFA.md, .claude/skills/emi-emc/SKILL.md, CLAUDE.md
+  - güncellendi; dfm_emc_check.py referans olarak kopyalandı.
+- **e0cdbbf** pcb-tool-v2: IPC-2152/2221/6012 hesaplayıcıları + .kicad_dru entegrasyonu — *aycaozkann*
+  - 4 yeni modül (empedans_cozucu.py'nin yapısal ikizi: tip ipuçları,
+  - argparse CLI, oz_testleri_calistir + fault-injection):
+  - - ipc2152_hesaplayici.py: min iz genişliği (akım/dT/katman/bakır kalınlığı).
+  - pcb_stackup_planner.iz_genisligi_hesapla_mm()'i ÇEKİRDEK olarak kullanır
+  - (tek kaynak gerçeklik) + belgelenen iç-katman derating katsayısı.
+  - IPC-2152'nin resmi eğri ailesini SAYISALLAŞTIRMADIĞI açıkça belirtildi.
+  - - ipc2221_clearance_hesaplayici.py: IPC-2221B Table 6-1 clearance/creepage,
+  - iç/dış katman × kaplamalı/kaplamasız, isteğe bağlı interpolasyon.
+  - pcb_stackup_planner.IPC2221_HARICI_MESAFE_TABLOSU_MM ile ortak
+  - noktalarda birebir eşleşme (öz-test kanıtlı). Yazılırken kendi
+  - öz-testi iki gerçek tasarım hatasını yakaladı: kaplama tabanının düşük
+  - voltajda ters dönmesi, interpolasyonda güven-seviyesi miras hatası.
+  - - ipc6012_dfm_motoru.py: annular ring / solder mask barajı / aspect ratio,
+  - Class 2 vs Class 3, bulgu_sozlesmesi.Bulgu ile PASS/FAIL/KAPSAM_YOK.
+  - Solder mask barajı IPC-6012'nin kendi sayısı değil, projenin kabul
+  - ettiği FAB_MIN_MASKE_BARAJI_MM'den miras alınıyor.
+  - - ipc_dru_koprusu.py: kural_dosyasi_olustur() ile .kicad_dru üretimi.
+  - Bu projede ESP32-C3 Smart Band revizyonunda ampirik olarak keşfedilmiş
+  - üç sessiz KiCad 10 tuzağını (zorunlu "(version 1)" başlığı, geçersiz
+  - "(priority)" token'ı, "#" vs ";" yorum karakteri) yapısal olarak
+  - imkânsız kılar. track_width/clearance/annular_width constraint'lerinin
+  - GERÇEKTEN uygulandığı (parse değil, gerçek DRC ihlali ürettiği) bu
+  - makinede ESP32C3_SmartBand.kicad_pcb'ye karşı doğrulandı (3->503 ve
+  - 187 ihlal ile) — dosya sahibinin orijinal .kicad_dru'su güvenle
+  - yedeklenip bit-bit aynı geri yüklendi.
+  - Bu doğrulama sırasında DOCS/03_Design_Rules.md'deki kural sırası
+  - açıklamasının TAM TERSİ olduğu da fark edilip düzeltildi (ilk eşleşen
+  - kural kazanır, sonra gelen değil).
+  - DOCS/03_Design_Rules.md bölüm 4/4b/4c/4d bu dört modülü kullanacak
+  - şekilde güncellendi. Test suite: 543 -> 634 passed, 1 skipped (91 yeni test).
+- **5162ee4** pcb-tool-v2: FreeRouting zincirini kilitle + kabuktan bağımsız ön-kontrol — *aycaozkann*
+  - 3) FreeRouting zinciri savunma derinliğiyle güvenli hale getirildi:
+  - - Yeni FreeRoutingDesteklenmiyorHatasi (NotImplementedError alt sınıfı)
+  - — çağıran kod bunu diğer ilgisiz "henüz yazılmadı" hatalarından
+  - ayırt edebilsin diye. dsn_disa_aktar()/ses_iceri_aktar() artık bunu
+  - fırlatıyor.
+  - - Yeni KICAD10_DSN_DESTEKLENIYOR=False modül bayrağı: fonksiyon hiç
+  - çağrılmadan durumu inceleyebilmek için.
+  - - freerouting_zinciri_calistir() artık bu bayrağı KENDİ BAŞINA, en
+  - tepede kontrol ediyor — dsn_disa_aktar()'a (dolayısıyla subprocess'e)
+  - hiç ulaşmadan durur. Böylece zincir "yanlışlıkla kullanılabilir"
+  - görünmüyor; iki bağımsız kontrol noktası var.
+  - 4) KURULUM.md'ye kabuktan bağımsız tüm-araç ön-kontrolü eklendi:
+  - - arac_yollari.py::tum_araclari_kontrol_et() — KURULUM.md'deki 9 aracın
+  - (kicad-cli, pcbnew/kipy, node, java, JLC2KiCadLib, kibot, uv, pytest,
+  - git) HER BİRİNİ BAĞIMSIZ dener; bash'in `&&` zincirinin aksine tek
+  - eksik araç diğerlerinin kontrolünü ENGELLEMEZ.
+  - - `uv run python ortam_on_kontrol.py --tam` — hem bash'te hem Windows
+  - PowerShell 5.1'de (which `&&` DESTEKLEMİYOR — bu makinede bilfiil
+  - doğrulandı) aynı şekilde çalışan tek komut. Gerçek makinede koşturulup
+  - çıktısı KURULUM.md'ye örnek olarak eklendi.
+  - - CLAUDE.md Faz -1 bu komutu kullanacak şekilde güncellendi.
+  - Her iki değişiklik için gerçek makinede koşturularak doğrulanmış
+  - regresyon testleri eklendi (subprocess hiç çağrılmadığını doğrulayan
+  - FreeRouting guard testi dahil).
+  - Test suite: 527 -> 543 passed, 1 skipped (16 yeni test).
+- **89cf953** pcb-tool-v2: üretim CLI'sindeki iki P0 fail-open kapıyı düzelt — *aycaozkann*
+  - Dış incelemede bulunan iki gerçek bulgu doğrulandı ve düzeltildi:
+  - 1. pcbnew yokken üretim kapısı sessizce PASS dönüyordu —
+  - ModuleNotFoundError yakalanıp "UYARI:" ön ekli bir mesaj ekleniyordu,
+  - sonra nihai temiz_mi hesabı bu ön ekli mesajları FİLTRELEYEREK
+  - hesaplanıyordu. Artık pcbnew yoksa VARSAYILAN davranış FAIL'dır; yeni
+  - --gercek-board-kontrolu-atla bayrağıyla bilinçli olarak atlanabilir
+  - ama sonuç yine PASS değil NEEDS_HUMAN olarak işaretlenir.
+  - Başarı/başarısızlık artık ayrı bir `basarili` boolean ile TAKİP EDİLİYOR,
+  - string ön-ekinden TÜRETİLMİYOR (bu desenin kırılganlığı Hafiza_Defteri'ne
+  - not edildi).
+  - 2. Bilinmeyen DRC/ERC şeması üretim kapısında PASS sayılıyordu —
+  - kicad_koprusu.py'de zaten var olan sema_taninmadi_mi() fail-closed
+  - kapısı bu release CLI'sinden hiç ÇAĞRILMIYORDU. Artık her iki rapor
+  - da önce şema kontrolünden geçiyor; tanınmayan şemada üretim durur.
+  - --force-atla-dogrulama (DRC/ERC dahil HER ŞEYİ atlayan debug bayrağı) ile
+  - yeni --gercek-board-kontrolu-atla (SADECE pcbnew eksikliğini, bilinçli ve
+  - NEEDS_HUMAN işaretli olarak atlayan dar bayrak) arasındaki fark
+  - docstring'de netleştirildi.
+  - Test suite: 521 -> 527 passed, 1 skipped (6 yeni regresyon testi).
+- **73008ef** pcb-tool-v2: Obsidian karar/hafıza yapısı + kicad-cli yol çözümü — *aycaozkann*
+  - Obsidian kasası kurulumu (bu GitHub reposuna bağlı — push ettikçe
+  - kasadaki notlar da taşınır, ayrı bir senkron mekanizması gerekmez):
+  - 1. Canlı Dashboard (DOCS/00_Dashboard.md, kullanıcı tarafından başlatılmış
+  - iskelet üzerine inşa edildi): #faz/* durum etiketi, TEST/ çıktılarına
+  - canlı bağlantılar (checker_raporu, bringup_checklist, simulasyon_raporu,
+  - routing_plan, gerber_dfm_raporu, mcad_carpisma_raporu — kırık görünmeleri
+  - normal, "adım henüz koşmadı" demektir), HAFIZA/ ve Changelog bağlantıları.
+  - DOCS/06-08 (Kararlar/Doğrulama/Üretim) + şablonlar zaten mevcuttu,
+  - dokunulmadı.
+  - 2. HAFIZA/Hafiza_Defteri.md — proje-ötesi, serbest-metin mühendislik
+  - dersleri günlüğü. HAFIZA/Hata_Hafizasi.md (hata_hafizasi.py'nin
+  - yapılandırılmış DRC/ERC imza veritabanı) ile KARIŞTIRILMAMASI için
+  - her iki dosyada da bilgi kutusu var. Gerçek, uydurulmamış derslerle
+  - tohumlandı (MASTER_RULEBOOK'un "Gerekçe:" notlarından + bugünkü dış
+  - inceleme düzeltmelerinden). CLAUDE.md'nin Faz -1'ine "başlamadan önce
+  - oku", adım 6'ya "PASS sonrası anlamlıysa ekle" olarak bağlandı.
+  - 3. degisiklik_gunlugu_uret.py — git log'dan Obsidian uyumlu Changelog.md
+  - üretir (idempotent, her koşuda baştan üretilir; Co-Authored-By gibi
+  - trailer'lar temizlenir). Bu makinedeki GERÇEK repo geçmişine karşı
+  - test edildi (21 test). Otomatik hook'a BAĞLANMADI — commit disiplininin
+  - parçası olarak elle çalıştırılması öneriliyor (OBSIDIAN_VAULT.md'de
+  - Obsidian Git eklentisi alternatifi de belgelendi).
+  - 4. kicad_koprusu.py::generate_bringup_checklist() artık her güç rayı için
+  - checkbox + "Ölçülen" hücreli bir tablo üretiyor — laboratuvarda
+  - Obsidian'da doldurulup Dogrulama_Kaydi şablonuyla arşivlenen canlı bir
+  - test kaydına dönüşüyor.
+  - Ayrıca (bu oturumda paralel geliştirilen, birlikte test edilen):
+  - - arac_yollari.py / ortam_on_kontrol.py: kicad-cli için taşınabilir,
+  - fail-closed yol çözümü (KICAD_CLI ortam değişkeni -> PATH -> Windows
+  - standart kurulum dizini) — dış incelemenin "kicad-cli PATH'te değil"
+  - notunu koda bağlıyor. kicad_koprusu.py/sematik_wire_motoru.py/
+  - uretim_ciktilari_cli.py bunu kullanacak şekilde güncellendi.
+  - Test suite: 493 -> 521 passed, 1 skipped.
+- **f166a26** pcb-tool-v2: dış inceleme P0/P1 bulgularını düzelt (gerçek kicad-cli/kicad_pcb ile doğrulandı) — *aycaozkann*
+  - Dış kod incelemesinde bulunan sorunları teker teker doğrulayıp düzelttim.
+  - Bazıları rapordan da ciddi çıktı — gerçek kicad-cli koşumları iki YENİ
+  - sessiz-PASS kaçağı ortaya çıkardı.
+  - P0 düzeltmeleri:
+  - - kicad_koprusu.py::gercek_board_dogrulama_kapisi() artık KAPSAM_YOK
+  - bulguları fail-closed kabul ediyor (kapsam_yok_izinli_kontroller ile
+  - açık istisna dışında); önceki sürüm "hiç kontrol edilmedi"yi sessizce
+  - "temiz" sayıyordu.
+  - - sematik_wire_motoru.py::kicad_kapali_mi_dogrula() artık platforma göre
+  - tasklist (Windows) / pgrep (Unix) kullanıyor; önceki sürüm Windows'ta
+  - FileNotFoundError ile şematik yazma işlemini koşulsuz kesiyordu (bu
+  - makinede gerçekten Windows'ta test edildi).
+  - - pytest artık pyproject.toml dependency-groups.dev altında; KURULUM.md
+  - `uv sync --group dev` adımını belgeliyor.
+  - Gerçek kicad-cli koşumuyla bulunan/doğrulanan P1'ler:
+  - - kicad_koprusu.py: ERC JSON şeması artık DOĞRULANDI (sheets[].violations,
+  - üst seviye violations DEĞİL) — eski kod gerçek 7 uyarılı bir şematikte
+  - HER ZAMAN sessizce PASS derdi. Ayrıca DRC'nin `unconnected_items`
+  - alanı (rapor incelemesinin fark etmediği bir kaçak) artık taranıyor —
+  - gerçek board'da 6 tane 'error' seviyeli eksik bağlantı sessizce PASS
+  - sayılıyordu. sema_taninmadi_mi() fail-closed kapısı eklendi.
+  - - uretim_zinciri_koprusu.py: kicad-cli'nin KiCad 10'da hem DSN dışa
+  - aktarımını hem Specctra Session import'unu DESTEKLEMEDİĞİ doğrulandı
+  - (pcb export/import --help ile) — dsn_disa_aktar()/ses_iceri_aktar()
+  - artık bunu net NotImplementedError ile yansıtıyor; CLAUDE.md ve
+  - pcb-layout SKILL.md'deki FreeRouting referansları güncellendi.
+  - Test suite: 470 -> 493 passed, 1 skipped (23 yeni regresyon testi,
+  - gerçek kicad-cli/.kicad_pcb/.kicad_sch verisiyle).
+- **d7a167e** pcb-tool-v2: MASTER_RULEBOOK senkronu + 7 yeni mühendislik köprüsü — *aycaozkann*
+  - MASTER_RULEBOOK.md ve CLAUDE.md, ESP32 projesindeki daha güncel sürümle
+  - senkronlandı (Faz 4b Mekanik-Termal Entegrasyon, wearable/anten/BOM
+  - kuralları) ve ecad_mcad_termal_kopru.py eklendi. Ayrıca CLAUDE.md'ye
+  - otonom yol bulma kuralı, pcb-layout SKILL.md'ye routing öncesi topoloji
+  - raporu onay kapısı (Aşama 3.7) eklendi.
+  - Yeni köprüler (hepsi TDD, bulgu_sozlesmesi.py sözleşmesiyle,
+  - oz_testleri_calistir + fault-injection dahil):
+  - - kuvvet_yonelimli_yerlesim.py: ratsnest-ağırlıklı force-directed placement
+  - - ngspice_koprusu.py: gerçek ngspice-46 ile uçtan uca doğrulanmış SPICE
+  - simülasyon köprüsü (Windows'ta ngspice_con.exe tuzağı düzeltildi)
+  - - topolojik_router_koprusu.py: L/U dönüşü + push&shove yol bulma
+  - - cad_api_koprusu.py: SnapEDA/Nexar CAD varlık edinme + lifecycle/pin
+  - sayısı kapıları
+  - - hata_hafizasi.py: Obsidian uyumlu DRC/ERC hata öğrenme hafızası
+  - - gerber_dfm_gorsel_koprusu.py: gerçek export edilmiş Gerber (RS-274X)
+  - üzerinde vektörel DFM taraması
+  - - mcad_carpisma_koprusu.py: gerçek kicad-cli STEP ihracı + .kicad_pcb
+  - yerleşiminden 3D çarpışma testi
+  - Test suite: 470 passed, 1 skipped (222 -> 470).
+- **b604f3c** Proje Tasımasi — *aycaozkann*
