@@ -29,7 +29,7 @@ tags:
 | Gereksinimler | 🔴 TASLAK | [[01_Design_Requirements]] dosyasını doldur ve onayla |
 | Stackup / empedans | 🔴 TASLAK | [[02_Stackup_and_Impedance]] |
 | DRC kuralları | 🔴 TASLAK | [[03_Design_Rules]] + fab parametreleri |
-| IPC standartları | ✅ EKLENDİ | IPC-2221 clearance, IPC-2152 iz genişliği, IPC-6012 DFM, IPC-DRU dönüşümü |
+| IPC standartları | ✅ EKLENDİ | IPC-2221 clearance, IPC-2152 iz genişliği, IPC-6012 DFM, IPC-DRU dönüşümü, IPC-2221 via delik çapı (`via_capi_hesaplayici.py`, `python main.py via-capi`) |
 | DFM / DFA | 🟡 Bekliyor | [[04_DFM_and_DFA]] + `ipc6012_dfm_motoru.py` |
 | Release | 🔴 BLOKE | [[05_Release_Checklist]] |
 

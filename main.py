@@ -191,6 +191,21 @@ def faz_uretim(pcb_path: Path, sch_path: Path, project_dir: Path) -> int:
     ])
 
 
+def cmd_via_capi(args: argparse.Namespace) -> int:
+    """İnce alt-komut sarmalayıcısı — tüm mantık `via_capi_hesaplayici.main()`'de;
+    burada sadece argparse Namespace'ini o modülün kendi CLI'sine devrediyoruz."""
+    import via_capi_hesaplayici
+
+    argv = ["--akim", str(args.akim), "--fabrika", args.fabrika]
+    if args.sicaklik_artisi is not None:
+        argv += ["--sicaklik-artisi", str(args.sicaklik_artisi)]
+    if args.kaplama_oz is not None:
+        argv += ["--kaplama-oz", str(args.kaplama_oz)]
+    if args.json:
+        argv += ["--json", args.json]
+    return via_capi_hesaplayici.main(argv)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     if not project_dir.is_dir():
@@ -436,6 +451,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--produce", action="store_true", help="ERC/DRC temizse Gerber/BOM/CPL de üret")
     run.add_argument("--kicad-cli", help="kicad-cli(.exe) tam yolu; KICAD_CLI ortam değişkenini ezer")
     run.set_defaults(func=cmd_run)
+
+    via_capi = sub.add_parser(
+        "via-capi",
+        help="IPC-2221 tabanlı via delik çapı / pad çapı hesaplayıcı (via_capi_hesaplayici.py)",
+    )
+    via_capi.add_argument("--akim", type=float, required=True, help="via'dan geçmesi gereken akım, A")
+    via_capi.add_argument(
+        "--fabrika", required=True,
+        help="fabrika DFM profili adı (pcb_stackup_planner.FABRIKA_PROFILLERI, ör. JLCPCB_STANDART)",
+    )
+    via_capi.add_argument("--sicaklik-artisi", dest="sicaklik_artisi", type=float, default=None, help="izin verilen sıcaklık artışı, °C (varsayılan 10)")
+    via_capi.add_argument("--kaplama-oz", dest="kaplama_oz", type=float, default=None, help="via kaplama kalınlığı, oz (varsayılan 1.0)")
+    via_capi.add_argument("--json", default=None, help="sonucu ayrıca bu dosyaya JSON olarak yaz")
+    via_capi.set_defaults(func=cmd_via_capi)
 
     promote = sub.add_parser(
         "promote",
