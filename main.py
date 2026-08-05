@@ -9,7 +9,14 @@
 Adım 4 (yerleşim/routing) ve adım 6-7 (checker/üretim) BİLİNÇLİ OLARAK bu
 komuta dahil EDİLMEDİ: onlar `pcbnew` + insan onayı (routing_plan.md) veya
 ayrı bir skill (design-checker) gerektiriyor, tek bir CLI komutunun arkasına
-sessizce gizlenemezler (bkz. MASTER_RULEBOOK "Ne zaman dur"). Bu script,
+sessizce gizlenemezler (bkz. MASTER_RULEBOOK "Ne zaman dur").
+
+**Faz 4b: Mekanik-Termal Entegrasyon (2026-08-03):** DRC kapısından hemen
+sonra `faz_termal_mekanik()` çalışır — proje kökünde `termal_mekanik_veri.json`
+varsa `ecad_mcad_termal_kopru.termal_mekanik_taramasi_calistir()` ile
+komponent/kasa termal teması taranır (`bulgu_sozlesmesi.Bulgu` sözleşmesi:
+`FAIL` -> hem `run` hem `promote` durur; `KAPSAM_YOK` -> veri paylaşılmamış,
+engel DEĞİL). Dosya yoksa faz sessizce KAPSAM_YOK raporlar, hata FIRLATMAZ. Bu script,
 DRC/ERC temiz olmadan `uretim_ciktilari_cli.py`'nin çağrılamayacağını
 GERÇEKTEN uygular — "fail-closed" davranışı elle tekrarlamak yerine mevcut
 modülleri sırayla çağırır.
@@ -29,18 +36,25 @@ yetmez.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from arac_yollari import tum_araclari_kontrol_et
 from bagimsiz_dogrulama import (
     bagimsiz_dogrulama_calistir,
     dogrulama_temiz_mi,
     kapsam_yok_maddeleri,
+)
+from bulgu_sozlesmesi import Bulgu, BulguDurumu, ozet_rapor
+from ecad_mcad_termal_kopru import (
+    KomponentTermalDurumu,
+    TermalTemasBolgesi,
+    termal_mekanik_taramasi_calistir,
 )
 from karar_birimleri import kabul_edilmemis_kararlari_bul, kararlari_yukle
 from kicad_koprusu import (
@@ -49,12 +63,29 @@ from kicad_koprusu import (
     drc_temiz_mi,
     erc_calistir,
 )
+from kuvvet_yonelimli_yerlesim import (
+    Komponent,
+    MesafeKisiti,
+    Net,
+    YerlesimKategorisi,
+    cakisma_kontrolu,
+    hiyerarsik_yerlesim_coz,
+    kisitlari_dogrula,
+    termal_kisitlarini_uret,
+    yerlesim_raporu_uret,
+)
+from pcb_stackup_planner import TermalYonetim
 from scratch_yonetimi import (
     kanonige_yukselt,
     scratch_kok_dizini,
     scratch_listele,
     scratch_olustur,
 )
+
+TERMAL_MEKANIK_VERI_DOSYASI = "termal_mekanik_veri.json"
+YERLESIM_VERI_DOSYASI = "yerlesim_veri.json"
+YERLESIM_SONUC_DOSYASI = "TEST/yerlesim_sonucu.json"
+ANAHAT_DURUM_DOSYASI = "TEST/anahat_durumu.json"
 
 
 def _konsol_utf8_ayarla() -> None:
@@ -158,6 +189,281 @@ def faz_sematik(sch_path: Path, kicad_cli: Optional[str]) -> bool:
     return temiz
 
 
+def _termal_mekanik_veri_yukle(
+    proje_dizini: Path,
+) -> tuple[list[KomponentTermalDurumu], list[TermalTemasBolgesi]]:
+    """`proje_dizini/termal_mekanik_veri.json` varsa parse eder, yoksa
+    BOŞ listeler döner (dosya yokluğu hata DEĞİL — `ecad_mcad_termal_kopru.py`
+    modülünün "kasa/güç verisi paylaşılmadıysa sessizce atla" disipliniyle
+    tutarlı; `faz_termal_mekanik` bu boşluğu `taranan=0` -> `KAPSAM_YOK`
+    olarak raporlar, sessizce YOK SAYMAZ)."""
+    veri_yolu = proje_dizini / TERMAL_MEKANIK_VERI_DOSYASI
+    if not veri_yolu.is_file():
+        return [], []
+
+    veri = json.loads(veri_yolu.read_text(encoding="utf-8"))
+    kritik_esik = veri.get("kritik_guc_esigi_W", 0.5)
+
+    komponentler = [
+        KomponentTermalDurumu(
+            yonetim=TermalYonetim(
+                isim=k["isim"],
+                guc_yayilimi_W=k["guc_yayilimi_W"],
+                mevcut_termal_via_sayisi=k.get("mevcut_termal_via_sayisi", 0),
+            ),
+            x=k["x"],
+            y=k["y"],
+            b_mask_acikligi_tanimli_mi=k.get("b_mask_acikligi_tanimli_mi", False),
+            yuzey_kaplamasi=k.get("yuzey_kaplamasi", "TBD"),
+        )
+        for k in veri.get("komponentler", [])
+    ]
+    yuzeyler = [
+        TermalTemasBolgesi(
+            isim=y["isim"],
+            poligon=[tuple(nokta) for nokta in y["poligon"]],
+            z_boslugu_mm=y["z_boslugu_mm"],
+        )
+        for y in veri.get("yuzeyler", [])
+    ]
+    # kritik_esik şu an KomponentTermalDurumu'na taşınmıyor, faz fonksiyonu
+    # termal_mekanik_taramasi_calistir()'a ayrıca geçirir.
+    return komponentler, yuzeyler
+
+
+def faz_termal_mekanik(proje_dizini: Path) -> Bulgu:
+    print("\n=== FAZ 4b: Mekanik-Termal Entegrasyon ===")
+    veri_yolu = proje_dizini / TERMAL_MEKANIK_VERI_DOSYASI
+    if not veri_yolu.is_file():
+        print(f"  ATLANDI: {TERMAL_MEKANIK_VERI_DOSYASI} bulunamadı — kasa/güç verisi "
+              "paylaşılmamış (KAPSAM_YOK, hata değil).")
+        return Bulgu("termal_mekanik_entegrasyonu", BulguDurumu.KAPSAM_YOK, 0, [], "veri dosyası yok")
+
+    komponentler, yuzeyler = _termal_mekanik_veri_yukle(proje_dizini)
+    veri = json.loads(veri_yolu.read_text(encoding="utf-8"))
+    bulgu = termal_mekanik_taramasi_calistir(
+        komponentler, yuzeyler, kritik_guc_esigi_W=veri.get("kritik_guc_esigi_W", 0.5)
+    )
+    for ihlal in bulgu.ihlaller:
+        print(f"  [{ihlal.get('komponent', '?')}] {ihlal.get('mesaj', '')}")
+    print(f"  Termal-mekanik: {bulgu.durum.value} ({bulgu.taranan} komponent, "
+          f"{len(bulgu.ihlaller)} ihlal)")
+    return bulgu
+
+
+_KATEGORI_HARITASI = {
+    "guc_dekuplaj": YerlesimKategorisi.GUC_DEKUPLAJ,
+    "kritik_hs": YerlesimKategorisi.KRITIK_HS,
+    "dusuk_hiz_io": YerlesimKategorisi.DUSUK_HIZ_IO,
+}
+
+
+def _yerlesim_veri_yukle(proje_dizini: Path):
+    """`proje_dizini/yerlesim_veri.json` varsa parse eder — yoksa
+    `faz_yerlesim_planlama` bunu KAPSAM_YOK olarak ele alır (dosya
+    yokluğu hata değil, `faz_termal_mekanik`'in aynı disiplini)."""
+    veri = json.loads((proje_dizini / YERLESIM_VERI_DOSYASI).read_text(encoding="utf-8"))
+
+    komponentler = [
+        Komponent(
+            ref=k["ref"], genislik_mm=k.get("genislik_mm", 2.0), yukseklik_mm=k.get("yukseklik_mm", 2.0),
+            x=k.get("x", 0.0), y=k.get("y", 0.0), sabit=k.get("sabit", False),
+        )
+        for k in veri.get("komponentler", [])
+    ]
+    kategoriler = {
+        k["ref"]: _KATEGORI_HARITASI[k["kategori"]]
+        for k in veri.get("komponentler", []) if "kategori" in k
+    }
+    netler = [
+        Net(isim=n["isim"], baglantilar=n["baglantilar"], agirlik=n.get("agirlik", 1.0))
+        for n in veri.get("netler", [])
+    ]
+    kisitlar = [
+        MesafeKisiti(
+            ref_a=k["ref_a"], ref_b=k["ref_b"], maks_mm=k.get("maks_mm"), min_mm=k.get("min_mm"),
+            aciklama=k.get("aciklama", ""),
+        )
+        for k in veri.get("kisitlar", [])
+    ]
+    return (
+        komponentler, kategoriler, netler, kisitlar,
+        veri.get("kart_genisligi_mm", 100.0), veri.get("kart_yuksekligi_mm", 100.0),
+    )
+
+
+def faz_yerlesim_planlama(
+    proje_dizini: Path,
+    baslangic_koordinatlari: Optional[Dict[str, Tuple[float, float]]] = None,
+) -> List[Bulgu]:
+    """Faz 4: Hiyerarşik force-directed yerleşim PLANLAMASI.
+
+    ÖNEMLİ SINIR (bilinçli, MASTER_RULEBOOK "Ne zaman dur" ile TUTARLI):
+    Bu faz `.kicad_pcb`'ye HİÇBİR ŞEY YAZMAZ — `kuvvet_yonelimli_yerlesim.py`
+    bir TOHUM/planlama motorudur (bkz. modülün kendi "bu modül tek başına
+    yerleşimi BİTİRMEZ" notu), gerçek `pcbnew` yazımı ayrı, insan onaylı bir
+    adımdır (dosyanın en başındaki "Adım 4 (yerleşim/routing) BİLİNÇLİ
+    OLARAK bu komuta dahil EDİLMEDİ" kuralı BOZULMAZ). Çıktı, `TEST/`
+    dizinine bir Markdown rapor olarak yazılır — insan bunu inceleyip
+    gerçek board'a elle/`pcbnew` script'iyle uygular.
+
+    Hiyerarşi ZORUNLU (`hiyerarsik_yerlesim_coz`): 1) güç/dekuplaj,
+    2) kritik HS/diferansiyel, 3) düşük hızlı I/O.
+
+    Termal keepout GİRDİ (habersiz ayrı adım DEĞİL): `termal_mekanik_veri.json`
+    (Faz 4b) paylaşılmışsa, kasa temas bölgesindeki ısı kaynağı komponentler
+    `termal_kisitlarini_uret()` ile ek sabit "termal çapa" komponentleri +
+    `MesafeKisiti` olarak BU yerleşimin girdisine eklenir.
+
+    `baslangic_koordinatlari` (FAZ 0.5 — anahat değişimi tetikleyicisi):
+    verilirse `hiyerarsik_yerlesim_coz()`'e geçirilir, motor SIFIRDAN
+    (altın-açı spiralinden) değil, verilen koordinatlardan başlar (bkz.
+    `cmd_anahat_degisti_yeniden_yerlestir`). Bu faz her çağrıldığında,
+    üretilen KESİN koordinatlar da `TEST/yerlesim_sonucu.json`'a
+    (Markdown rapordan AYRI, makine tarafından okunabilir bir kopya)
+    yazılır — bir SONRAKİ anahat değişimi bu dosyayı okuyup buradan
+    devam eder.
+    """
+    print("\n=== FAZ 4: Yerleşim Planlaması (Hiyerarşik Force-Directed) ===")
+    veri_yolu = proje_dizini / YERLESIM_VERI_DOSYASI
+    if not veri_yolu.is_file():
+        print(f"  ATLANDI: {YERLESIM_VERI_DOSYASI} bulunamadı (KAPSAM_YOK, hata değil).")
+        kapsam_yok = lambda isim: Bulgu(isim, BulguDurumu.KAPSAM_YOK, 0, [], "veri dosyası yok")
+        return [kapsam_yok("courtyard_cakismasi"), kapsam_yok("mesafe_kisitlari")]
+
+    komponentler, kategoriler, netler, kisitlar, genislik, yukseklik = _yerlesim_veri_yukle(proje_dizini)
+
+    termal_veri_yolu = proje_dizini / TERMAL_MEKANIK_VERI_DOSYASI
+    if termal_veri_yolu.is_file():
+        termal_komponentler, termal_yuzeyler = _termal_mekanik_veri_yukle(proje_dizini)
+        termal_capalar, termal_kisitlar = termal_kisitlarini_uret(termal_komponentler, termal_yuzeyler)
+        komponentler = list(komponentler) + termal_capalar
+        kisitlar = list(kisitlar) + termal_kisitlar
+        if termal_capalar:
+            print(f"  Faz 4b termal keepout girdisi: {len(termal_capalar)} komponent için "
+                  "ek kasa-temas kısıtı eklendi.")
+
+    sonuc = hiyerarsik_yerlesim_coz(
+        komponentler, kategoriler, netler, genislik, yukseklik, kisitlar,
+        baslangic_koordinatlari=baslangic_koordinatlari,
+    )
+    cakisma_bulgu = cakisma_kontrolu(komponentler, sonuc.koordinatlar)
+    kisit_bulgu = kisitlari_dogrula(kisitlar, sonuc.koordinatlar)
+
+    print(f"  Yerleşim: {sonuc.iterasyon} iterasyon, yakınsadı={sonuc.yakinsadi_mi}, "
+          f"ratsnest {sonuc.baslangic_ratsnest_mm}mm -> {sonuc.son_ratsnest_mm}mm")
+    print(f"  Çakışma kontrolü: {cakisma_bulgu.durum.value} ({len(cakisma_bulgu.ihlaller)} ihlal)")
+    print(f"  Mesafe kısıtları: {kisit_bulgu.durum.value} ({len(kisit_bulgu.ihlaller)} ihlal)")
+
+    kumeler_ref_listesi = [[k.ref for k in komponentler]]
+    rapor = yerlesim_raporu_uret(sonuc, kumeler_ref_listesi, [cakisma_bulgu, kisit_bulgu])
+    rapor_dizini = proje_dizini / "TEST"
+    rapor_dizini.mkdir(parents=True, exist_ok=True)
+    (rapor_dizini / "yerlesim_raporu.md").write_text(rapor, encoding="utf-8")
+    print(f"  Rapor: {rapor_dizini / 'yerlesim_raporu.md'}")
+
+    (proje_dizini / YERLESIM_SONUC_DOSYASI).write_text(
+        json.dumps({"koordinatlar": {ref: list(xy) for ref, xy in sonuc.koordinatlar.items()}}, indent=2),
+        encoding="utf-8",
+    )
+
+    return [cakisma_bulgu, kisit_bulgu]
+
+
+# ------------------------------------------------------------------
+# FAZ 0.5: Board anahat (DXF) değişimine otomatik yeniden yerleşim
+# ------------------------------------------------------------------
+#
+# NEDEN AYRI BİR TETİKLEYİCİ (cmd_run'ın İÇİNE GÖMÜLMEDİ): DXF/mekanik
+# anahat entegrasyonu şu an `main.py`'nin otomatik akışına (adım 1-7)
+# HENÜZ BAĞLANMADI (bkz. CLAUDE.md — `mekanik_dxf_koprusu.py` elle/ayrı
+# çağrılıyor). Bu yüzden "anahat değişti mi" sorusunu `cmd_run` içine
+# sessizce gömmek, olmayan bir entegrasyonu VARMIŞ gibi göstermek olurdu.
+# Bunun yerine bağımsız bir CLI komutu: kullanıcı/ajan mekanik DXF'i
+# güncellediğinde AÇIKÇA çağırır, `main.py anahat-degisti-yeniden-yerlestir`.
+
+def _dxf_icerik_hash_hesapla(dxf_yolu: Path) -> str:
+    return hashlib.sha256(dxf_yolu.read_bytes()).hexdigest()
+
+
+def anahat_degisti_mi(proje_dizini: Path, dxf_yolu: Path) -> bool:
+    """DXF dosyasının İÇERİK hash'ini (mtime DEĞİL — mtime dosya kopyalanınca/
+    checkout edilince bile değişir, sahte pozitif üretir) `TEST/anahat_
+    durumu.json`'daki KAYITLI hash ile karşılaştırır.
+
+    Kayıt hiç YOKSA (ilk çalıştırma) `True` döner — "değişti" değil ama
+    karşılaştıracak bir önceki durum da yok; bu fonksiyonun çağıranı
+    (`cmd_anahat_degisti_yeniden_yerlestir`) bu durumda zaten önceki bir
+    yerleşim sonucu bulamayacağı için spiralden başlar, davranış doğru
+    sonuca varır.
+    """
+    durum_yolu = proje_dizini / ANAHAT_DURUM_DOSYASI
+    if not durum_yolu.is_file():
+        return True
+    kayitli = json.loads(durum_yolu.read_text(encoding="utf-8"))
+    return kayitli.get("dxf_sha256") != _dxf_icerik_hash_hesapla(dxf_yolu)
+
+
+def _anahat_durumunu_kaydet(proje_dizini: Path, dxf_yolu: Path) -> None:
+    durum_yolu = proje_dizini / ANAHAT_DURUM_DOSYASI
+    durum_yolu.parent.mkdir(parents=True, exist_ok=True)
+    durum_yolu.write_text(
+        json.dumps({"dxf_sha256": _dxf_icerik_hash_hesapla(dxf_yolu), "dxf_yolu": str(dxf_yolu)}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def onceki_yerlesim_koordinatlarini_yukle(proje_dizini: Path) -> Optional[Dict[str, Tuple[float, float]]]:
+    """`faz_yerlesim_planlama()`'nın en son yazdığı `TEST/yerlesim_sonucu.json`'u
+    okur. Dosya YOKSA (hiç yerleşim çalışmamış) `None` döner — sessizce
+    boş bir koordinat kümesi UYDURULMAZ, çağıran bunu "spiralden başla"
+    sinyali olarak okur."""
+    yol = proje_dizini / YERLESIM_SONUC_DOSYASI
+    if not yol.is_file():
+        return None
+    veri = json.loads(yol.read_text(encoding="utf-8"))
+    return {ref: (float(xy[0]), float(xy[1])) for ref, xy in veri.get("koordinatlar", {}).items()}
+
+
+def cmd_anahat_degisti_yeniden_yerlestir(args: argparse.Namespace) -> int:
+    """`main.py anahat-degisti-yeniden-yerlestir` — mekanik DXF anahatı
+    DEĞİŞTİYSE, force-directed yerleşimi SIFIRDAN değil, önceki yakınsanmış
+    sonucu başlangıç noktası alarak yeniden çalıştırır (FAZ 0.5 madde 8).
+
+    Anahat DEĞİŞMEDİYSE (hash aynı) yerleşim TEKRAR ÇALIŞTIRILMAZ — gereksiz
+    bir yeniden-hesaplama yapılmaz, `0` (başarı, "değişiklik yok") döner.
+    """
+    proje_dizini = Path(args.proje_dizini)
+    dxf_yolu = Path(args.dxf_yolu)
+    if not dxf_yolu.is_file():
+        print(f"HATA: DXF dosyası bulunamadı: {dxf_yolu}")
+        return 2
+
+    if not anahat_degisti_mi(proje_dizini, dxf_yolu):
+        print(f"Anahat DEĞİŞMEDİ ({dxf_yolu.name}) — yeniden yerleşim tetiklenmedi.")
+        return 0
+
+    onceki_koordinatlar = onceki_yerlesim_koordinatlarini_yukle(proje_dizini)
+    if onceki_koordinatlar:
+        print(
+            f"Anahat DEĞİŞTİ ({dxf_yolu.name}) — önceki yerleşimin "
+            f"{len(onceki_koordinatlar)} komponentlik koordinat kümesi başlangıç "
+            "noktası olarak kullanılıyor (SIFIRDAN DEĞİL)."
+        )
+    else:
+        print(f"Anahat DEĞİŞTİ ({dxf_yolu.name}) — önceki bir yerleşim sonucu yok, spiralden başlanıyor.")
+
+    bulgular = faz_yerlesim_planlama(proje_dizini, baslangic_koordinatlari=onceki_koordinatlar)
+    _anahat_durumunu_kaydet(proje_dizini, dxf_yolu)
+
+    basarisiz = [b for b in bulgular if b.durum == BulguDurumu.FAIL]
+    if basarisiz:
+        print(f"  SONUÇ: {len(basarisiz)} bulgu FAIL — yerleşim raporu incelenmeli.")
+        return 1
+    print("  SONUÇ: yeniden yerleşim tamamlandı, sert kabul kapıları PASS/KAPSAM_YOK.")
+    return 0
+
+
 def faz_drc(pcb_path: Path, kicad_cli: Optional[str]) -> bool:
     print("\n=== FAZ 5: DRC kapısı ===")
     rapor = drc_calistir(str(pcb_path), kicad_cli=kicad_cli)
@@ -206,6 +512,126 @@ def cmd_via_capi(args: argparse.Namespace) -> int:
     return via_capi_hesaplayici.main(argv)
 
 
+def cmd_coklu_kart_dogrula(args: argparse.Namespace) -> int:
+    """Çoklu Kart (Kamera Kartı x6 + Ana Kart) arayüz sözleşmesi kapısı —
+    `coklu_kart_sozlesme_kontrolu.py`'yi CLI'ye bağlar. KiCad'de resmi bir
+    "multi-board" modu olmadığı için iki projenin ÇIKTISINI (konnektör
+    pinout'u, VC ID ataması, güç bütçesi) `arayuz_sozlesmesi.yaml`'a karşı
+    çapraz doğrulayan tek giriş noktasıdır (bkz. dosyanın kendi
+    docstring'i). PASS/FAIL sonucu, `--karar-proje-dir` verilmişse
+    `karar_birimleri.json`'a "coklu-kart-arayuz-tutarli" kararı olarak da
+    yazılır — bu, o projenin `promote` kapısını (mevcut
+    `kabul_edilmemis_kararlari_bul()` mekanizması ÜZERİNDEN, `cmd_promote`'a
+    HİÇBİR yeni kod eklenmeden) otomatik olarak bağlar."""
+    import coklu_kart_sozlesme_kontrolu as ckk
+
+    print("\n=== ÇOKLU KART: kamera kartı <-> ana kart arayüz sözleşmesi ===")
+    bulgular = ckk.tum_coklu_kart_kontrollerini_calistir(
+        Path(args.sozlesme), Path(args.kamera_karti), Path(args.ana_kart),
+        konnektor_sayisi=args.konnektor_sayisi,
+        ana_kart_guc_girisi_maks_a=args.ana_kart_guc_girisi_maks_a,
+    )
+    ozet = ozet_rapor(bulgular)
+    for k in ozet["kontroller"]:
+        print(f"  [{k['durum']}] {k['kontrol']} (taranan={k['taranan']}, ihlal={k['ihlal_sayisi']})")
+        for ihlal in k["ihlaller"]:
+            print(f"    - {ihlal}")
+
+    fail_var = any(b.durum == BulguDurumu.FAIL for b in bulgular)
+    kapsam_yok_var = any(b.durum == BulguDurumu.KAPSAM_YOK for b in bulgular)
+    pass_mi = not fail_var and not kapsam_yok_var
+
+    if args.karar_proje_dir:
+        detay = "; ".join(
+            f"{k['kontrol']}={k['durum']}" for k in ozet["kontroller"] if k["durum"] != "PASS"
+        )
+        ckk.coklu_kart_karari_kaydet(args.karar_proje_dir, pass_mi, detay)
+        print(f"  karar_birimleri.json güncellendi ({args.karar_proje_dir}): "
+              f"{ckk.COKLU_KART_KARAR_ID} -> {'KABUL_EDILDI' if pass_mi else 'ACIK'}")
+
+    if fail_var:
+        print("\nSONUÇ: FAIL — çoklu kart arayüz sözleşmesi ihlal edildi.")
+        return 1
+    if kapsam_yok_var:
+        print("\nSONUÇ: KAPSAM_YOK — bazı kontroller hiç çalıştırılamadı, bu PASS SAYILMAZ.")
+        return 1
+    print("\nSONUÇ: PASS — çoklu kart arayüz sözleşmesi tüm kontrollerden geçti.")
+    return 0
+
+
+def cmd_sistem_atama_plani_uret(args: argparse.Namespace) -> int:
+    """`sistem_orkestratoru.py`'yi CLI'ye bağlar — 6 kamera kartı için VC ID
+    + deserializer I2C adres-çevirisi planını hesaplar, doğrular, ve
+    (isteğe bağlı) `arayuz_sozlesmesi.yaml`'a yazar.
+
+    Önceden bu modül `main.py`'ye HİÇ bağlı değildi (sadece kendi test
+    dosyasından çağrılıyordu) — bu, kod incelemesinde bulunan somut bir
+    boşluktu. `plani_dogrula()` FAIL verirse hiçbir dosyaya YAZILMAZ
+    (fail-closed — `coklu_kart_sozlesme_kontrolu.py` ile AYNI disiplin:
+    geçersiz bir plan sessizce kalıcı hale getirilmez)."""
+    import sistem_orkestratoru as so
+
+    taban_adres = int(args.deserializer_taban_hedef_adresi, 0)
+    plan = so.atama_plani_uret(
+        args.kamera_sayisi, args.sensor_i2c_adresi, deserializer_taban_hedef_adresi=taban_adres,
+    )
+
+    print(f"\n=== SİSTEM ATAMA PLANI: {args.kamera_sayisi} kamera kartı ===")
+    for a in plan.atamalar:
+        print(f"  kart_{a.kart_no}: vc_id={a.vc_id}, kanal={a.deserializer_kanal_no}, "
+              f"sensor={a.sensor_sabit_i2c_adresi}, deserializer_hedef={a.deserializer_hedef_i2c_adresi}")
+
+    bulgu = so.plani_dogrula(plan, deserializer_maks_kanal=args.deserializer_maks_kanal)
+    print(f"\n  [{bulgu.durum.value}] {bulgu.kontrol} (taranan={bulgu.taranan}, ihlal={len(bulgu.ihlaller)})")
+    for ihlal in bulgu.ihlaller:
+        print(f"    - {ihlal}")
+
+    if bulgu.durum != BulguDurumu.PASS:
+        print("\nSONUÇ: FAIL — plan doğrulamadan geçmedi, HİÇBİR dosyaya yazılmadı.")
+        return 1
+
+    if args.sozlesme:
+        so.plani_sozlesmeye_birlestir(plan, Path(args.sozlesme))
+        print(f"\nSONUÇ: PASS — {args.sozlesme} güncellendi (vc_id + i2c_adres_cevirisi).")
+    elif args.cikti:
+        so.plani_yaml_e_yaz(plan, Path(args.cikti))
+        print(f"\nSONUÇ: PASS — plan {args.cikti} dosyasına yazıldı.")
+    else:
+        print("\nSONUÇ: PASS (dosyaya yazılmadı — --sozlesme veya --cikti verilmedi).")
+    return 0
+
+
+def cmd_device_tree_uret(args: argparse.Namespace) -> int:
+    """`device_tree_uretici.py`'yi CLI'ye bağlar — `arayuz_sozlesmesi.yaml`
+    + `sistem_orkestratoru.py` çıktısından (vc_id + i2c_adres_cevirisi)
+    RK3588 için bir `.dts` fragment'i üretir.
+
+    Ambarella için bu komut HER ZAMAN KAPSAM_YOK (çıkış kodu 1) döner —
+    bu bir HATA DEĞİL, `device_tree_uretici.py`'nin kendi dosya
+    başlığındaki bilinçli sınırdır (kapalı/NDA'lı SDK, syntax
+    UYDURULMAZ)."""
+    import json
+
+    import device_tree_uretici as dtu
+
+    bus_haritasi = {int(k): v for k, v in json.loads(args.bus_haritasi).items()}
+    cikti_yolu = Path(args.cikti) if args.cikti else None
+
+    bulgu = dtu.dts_fragment_uret(
+        args.soc, Path(args.sozlesme), bus_haritasi,
+        cikti_yolu=cikti_yolu, sensor_compatible=args.sensor_compatible,
+    )
+    print(f"\n=== DEVICE TREE FRAGMENT ÜRETİMİ ({args.soc}) ===")
+    print(f"  [{bulgu.durum.value}] {bulgu.kontrol} (taranan={bulgu.taranan})")
+    print(f"  {bulgu.detay}")
+
+    if bulgu.durum == BulguDurumu.PASS:
+        print("\nSONUÇ: PASS")
+        return 0
+    print("\nSONUÇ: KAPSAM_YOK — .dts üretilemedi/yazılmadı (bkz. detay).")
+    return 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     if not project_dir.is_dir():
@@ -238,11 +664,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     print(f"\nProje: {pro.name}  [scratch-id={scratch_dir.name}]")
 
-    sematik_temiz = True
+    # DÜZELTME (cmd_promote'daki AYNI hata sınıfı — tutarlılık için burada da
+    # düzeltildi): önceden `sematik_temiz = True` varsayılıp `.kicad_sch`
+    # yoksa sessizce True kalıyordu — "ERC PASS oldu" ile "ERC hiç
+    # KOŞMADI" ayırt edilemiyordu. Şimdi `None` (koşmadı) / `True` (PASS) /
+    # `False` (FAIL) üç durumlu — sadece `sematik_temiz is False` gate'i
+    # engeller, `None` (PCB-only akış meşru olabilir) engellemez.
+    sematik_temiz = None
     if sch is not None:
         sematik_temiz = faz_sematik(sch, args.kicad_cli)
     else:
-        print("\n=== FAZ 2-3: Şematik + ERC === \n  ATLANDI: .kicad_sch bulunamadı")
+        print("\n=== FAZ 2-3: Şematik + ERC === \n  ATLANDI: .kicad_sch bulunamadı — "
+              "ERC bu koşumda KOŞMADI (PASS SAYILMADI, sadece atlandı).")
 
     drc_temiz = True
     if pcb is not None:
@@ -250,8 +683,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         print("\n=== FAZ 5: DRC kapısı === \n  ATLANDI: .kicad_pcb bulunamadı")
 
-    if not (sematik_temiz and drc_temiz):
-        print("\nSONUÇ: FAIL — ERC/DRC hatası temizlenmeden üretime geçilmez.")
+    termal_bulgu = faz_termal_mekanik(scratch_dir)
+    termal_temiz = termal_bulgu.durum != BulguDurumu.FAIL
+
+    yerlesim_bulgulari = faz_yerlesim_planlama(scratch_dir)
+    yerlesim_temiz = all(b.durum != BulguDurumu.FAIL for b in yerlesim_bulgulari)
+
+    sematik_fail = sematik_temiz is False
+    if sematik_fail or not (drc_temiz and termal_temiz and yerlesim_temiz):
+        print("\nSONUÇ: FAIL — ERC/DRC/termal-mekanik/yerleşim hatası temizlenmeden üretime geçilmez.")
         return 1
 
     if args.produce:
@@ -357,17 +797,45 @@ def cmd_promote(args: argparse.Namespace) -> int:
     red_nedenleri: list = []
 
     # (1) taze DRC/ERC
-    sematik_temiz = True
     if sch is not None:
         sematik_temiz = faz_sematik(sch, args.kicad_cli)
         if not sematik_temiz:
             kapilar_gecti = False
             red_nedenleri.append("ERC temiz değil")
+    else:
+        # DÜZELTME: önceden burada sessizce sematik_temiz=True varsayılıyordu
+        # — bu, "ERC PASS oldu" ile "ERC hiç KOŞMADI" durumlarını promote
+        # çıktısında AYIRT EDİLEMEZ hale getiriyordu (bulgu_sozlesmesi.py'nin
+        # önlemeye çalıştığı SESSİZ SAHTE PASS deseni). Şimdilik promotion'ı
+        # ENGELLEMİYORUZ (bazı projelerde .kicad_sch olmadan PCB-only akış
+        # meşru olabilir) ama durumu açıkça görünür kılıyoruz.
+        # NOT: red_nedenleri sadece kapilar_gecti=False olduğunda (RED
+        # yolunda) okunuyor — buraya eklemek promotion BAŞARILI olduğunda
+        # hiç görünmeyen ölü bir satır olurdu. Asıl düzeltme aşağıdaki
+        # anlık print — bu, promote BAŞARILI da olsa görünür.
+        print("UYARI: .kicad_sch bulunamadı — ERC bu promote koşumunda "
+              "KOŞMADI (PASS SAYILMADI, sadece atlandı).")
+        sematik_temiz = None  # True/False DEĞİL — rapora "koşmadı" olarak
+        # geçsin (JSON'da null), sessizce True ile karıştırılmasın (rapor
+        # dict'indeki "erc_temiz" alanı).
 
     drc_temiz = faz_drc(pcb, args.kicad_cli)
     if not drc_temiz:
         kapilar_gecti = False
         red_nedenleri.append("DRC temiz değil")
+
+    termal_bulgu = faz_termal_mekanik(scratch_dir)
+    if termal_bulgu.durum == BulguDurumu.FAIL:
+        kapilar_gecti = False
+        red_nedenleri.append("termal-mekanik entegrasyonu FAIL")
+
+    yerlesim_bulgulari = faz_yerlesim_planlama(scratch_dir)
+    yerlesim_fail = [b for b in yerlesim_bulgulari if b.durum == BulguDurumu.FAIL]
+    if yerlesim_fail:
+        kapilar_gecti = False
+        red_nedenleri.append(
+            "yerleşim planlaması FAIL: " + ", ".join(b.kontrol for b in yerlesim_fail)
+        )
 
     # (2) bağımsız verifier — proje-özel kontrat, KiCad DRC'den BAĞIMSIZ
     print("\n=== Bağımsız doğrulama (proje-özel kontrat) ===")
@@ -423,6 +891,16 @@ def cmd_promote(args: argparse.Namespace) -> int:
         "komut": komut_argv,
         "erc_temiz": sematik_temiz,
         "drc_temiz": drc_temiz,
+        "termal_mekanik": {
+            "durum": termal_bulgu.durum.value,
+            "taranan": termal_bulgu.taranan,
+            "ihlal_sayisi": len(termal_bulgu.ihlaller),
+        },
+        "yerlesim_planlama": [
+            {"kontrol": b.kontrol, "durum": b.durum.value, "taranan": b.taranan,
+             "ihlal_sayisi": len(b.ihlaller)}
+            for b in yerlesim_bulgulari
+        ],
         "bagimsiz_dogrulama": dogrulama_ozeti,
         "karar_sayisi": len(kararlar),
         "sonuc": "PROMOTED",
@@ -466,6 +944,41 @@ def build_parser() -> argparse.ArgumentParser:
     via_capi.add_argument("--json", default=None, help="sonucu ayrıca bu dosyaya JSON olarak yaz")
     via_capi.set_defaults(func=cmd_via_capi)
 
+    coklu_kart = sub.add_parser(
+        "coklu-kart-dogrula",
+        help="kamera kartı (x6) + ana kart arayüz sözleşmesi (konnektör pinout/VC ID/güç bütçesi) çapraz doğrulaması",
+    )
+    coklu_kart.add_argument("--sozlesme", required=True, help="arayuz_sozlesmesi.yaml yolu")
+    coklu_kart.add_argument("--kamera-karti", required=True, dest="kamera_karti", help="kamera kartı .kicad_pcb yolu")
+    coklu_kart.add_argument("--ana-kart", required=True, dest="ana_kart", help="ana kart .kicad_pcb yolu")
+    coklu_kart.add_argument("--konnektor-sayisi", dest="konnektor_sayisi", type=int, default=6, help="ana karttaki kamera konnektörü sayısı (varsayılan 6)")
+    coklu_kart.add_argument("--ana-kart-guc-girisi-maks-a", dest="ana_kart_guc_girisi_maks_a", type=float, default=None, help="ana kart güç giriş sınırı, A (verilmezse sözleşmedeki değer kullanılır)")
+    coklu_kart.add_argument("--karar-proje-dir", dest="karar_proje_dir", default=None, help="sonucu bu projenin karar_birimleri.json'ına 'coklu-kart-arayuz-tutarli' kararı olarak yaz (verilmezse yazılmaz)")
+    coklu_kart.set_defaults(func=cmd_coklu_kart_dogrula)
+
+    atama_plani = sub.add_parser(
+        "sistem-atama-plani-uret",
+        help="6 kamera kartı için VC ID + deserializer I2C adres-çevirisi planı üretir/doğrular (sistem_orkestratoru.py)",
+    )
+    atama_plani.add_argument("--kamera-sayisi", dest="kamera_sayisi", type=int, required=True, help="kart sayısı (ör. 6)")
+    atama_plani.add_argument("--sensor-i2c-adresi", dest="sensor_i2c_adresi", required=True, help="sensörün SABİT SCCB/I2C adresi, ör. 0x36 (TÜM kartlarda aynı)")
+    atama_plani.add_argument("--deserializer-taban-hedef-adresi", dest="deserializer_taban_hedef_adresi", default="0x40", help="deserializer'ın ilk karta atayacağı hedef adres, ör. 0x40 (varsayılan 0x40)")
+    atama_plani.add_argument("--deserializer-maks-kanal", dest="deserializer_maks_kanal", type=int, required=True, help="deserializer'ın desteklediği maksimum kanal sayısı")
+    atama_plani.add_argument("--sozlesme", default=None, help="mevcut arayuz_sozlesmesi.yaml yolu — verilirse SADECE vc_id/i2c_adres_cevirisi bölümleri güncellenir")
+    atama_plani.add_argument("--cikti", default=None, help="--sozlesme verilmezse planı bu yeni dosyaya yaz")
+    atama_plani.set_defaults(func=cmd_sistem_atama_plani_uret)
+
+    dts = sub.add_parser(
+        "device-tree-uret",
+        help="arayuz_sozlesmesi.yaml + sistem_orkestratoru.py çıktısından RK3588 .dts fragment'i üretir (Ambarella: HER ZAMAN KAPSAM_YOK, bkz. device_tree_uretici.py)",
+    )
+    dts.add_argument("--soc", required=True, choices=["rk3588", "ambarella"])
+    dts.add_argument("--sozlesme", required=True, help="arayuz_sozlesmesi.yaml yolu (i2c_adres_cevirisi/vc_id bölümleri dolu olmalı)")
+    dts.add_argument("--bus-haritasi", dest="bus_haritasi", required=True, help='kart_no->I2C bus JSON, ör. {"1":"i2c1","2":"i2c3"}')
+    dts.add_argument("--sensor-compatible", dest="sensor_compatible", default="ovti,og05b10", help="devicetree compatible string (varsayılan OG05B10)")
+    dts.add_argument("--cikti", default=None, help="üretilen .dts fragment'inin yazılacağı dosya")
+    dts.set_defaults(func=cmd_device_tree_uret)
+
     promote = sub.add_parser(
         "promote",
         help="scratch -> kanonik yükseltme kapısı (DRC/ERC + proje-özel kontrat + karar birimleri)",
@@ -474,6 +987,14 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--scratch-id", default=None, help="yükseltilecek scratch id; verilmezse en yeni scratch kullanılır")
     promote.add_argument("--kicad-cli", help="kicad-cli(.exe) tam yolu; KICAD_CLI ortam değişkenini ezer")
     promote.set_defaults(func=cmd_promote)
+
+    anahat = sub.add_parser(
+        "anahat-degisti-yeniden-yerlestir",
+        help="mekanik DXF anahatı değiştiyse, force-directed yerleşimi önceki sonucu başlangıç alarak yeniden çalıştırır (FAZ 0.5 madde 8)",
+    )
+    anahat.add_argument("--proje-dizini", dest="proje_dizini", required=True, help="proje kök dizini (yerlesim_veri.json'ın bulunduğu yer)")
+    anahat.add_argument("--dxf-yolu", dest="dxf_yolu", required=True, help="mekanik board anahat DXF dosyasının yolu")
+    anahat.set_defaults(func=cmd_anahat_degisti_yeniden_yerlestir)
 
     return ap
 

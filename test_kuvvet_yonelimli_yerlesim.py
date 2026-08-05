@@ -129,6 +129,69 @@ def test_baslangic_yerlesimi_gecersiz_kart_boyutu_reddeder():
         baslangic_yerlesimi_uret([Komponent("U1")], 0.0, 10.0)
 
 
+# ------------------------------------------------------------------
+# FAZ 0.5: baslangic_koordinatlari — anahat değişince yeniden yerleşim
+# ------------------------------------------------------------------
+
+def test_baslangic_koordinatlari_verilirse_spiral_yerine_kullanilir():
+    komponentler = [Komponent("U1", genislik_mm=2.0, yukseklik_mm=2.0)]
+    onceki = {"U1": (12.0, 8.0)}
+    koord = baslangic_yerlesimi_uret(komponentler, 30.0, 30.0, baslangic_koordinatlari=onceki)
+    assert koord["U1"] == (12.0, 8.0)
+
+
+def test_baslangic_koordinatlari_yeni_kart_sinirina_kirpilir():
+    """Anahat KÜÇÜLMÜŞ olabilir — eski koordinat yeni kart dışında kalıyorsa
+    kırpılmalı, kart dışı bir başlangıç noktası ÜRETİLMEMELİ."""
+    komponentler = [Komponent("U1", genislik_mm=2.0, yukseklik_mm=2.0)]
+    onceki = {"U1": (100.0, 100.0)}  # eski (büyük) kartta geçerliydi
+    koord = baslangic_yerlesimi_uret(komponentler, 20.0, 20.0, baslangic_koordinatlari=onceki)
+    x, y = koord["U1"]
+    assert x <= 20.0 - 1.0  # genislik_mm/2.0 payı
+    assert y <= 20.0 - 1.0
+
+
+def test_baslangic_koordinatlarinda_olmayan_yeni_komponent_spirale_duser():
+    """Anahat değiştikten sonra netliste EKLENEN yeni bir komponent için
+    önceki sonuçta kayıt yoktur — sessizce (0,0)'a düşmez, spiral üretir
+    (deterministik: aynı girdiyle iki çağrı aynı sonucu verir) ve verilen
+    `onceki` koordinatıyla ÇAKIŞMAZ (sessizce üst üste konmaz)."""
+    komponentler = [Komponent("U1", genislik_mm=2.0, yukseklik_mm=2.0), Komponent("U2_YENI")]
+    onceki = {"U1": (12.0, 8.0)}
+    koord_a = baslangic_yerlesimi_uret(komponentler, 30.0, 30.0, baslangic_koordinatlari=onceki)
+    koord_b = baslangic_yerlesimi_uret(komponentler, 30.0, 30.0, baslangic_koordinatlari=onceki)
+    assert koord_a["U1"] == (12.0, 8.0)
+    assert koord_a["U2_YENI"] == koord_b["U2_YENI"]  # deterministik
+    assert koord_a["U2_YENI"] != (12.0, 8.0)
+    assert koord_a["U2_YENI"] != (0.0, 0.0)
+
+
+def test_baslangic_koordinatlari_sabit_komponenti_ezmez():
+    komponentler = [Komponent("J1", x=1.0, y=2.0, sabit=True)]
+    onceki = {"J1": (99.0, 99.0)}  # sabit komponent için VERİLSE BİLE göz ardı edilmeli
+    koord = baslangic_yerlesimi_uret(komponentler, 30.0, 30.0, baslangic_koordinatlari=onceki)
+    assert koord["J1"] == (1.0, 2.0)
+
+
+def test_baslangic_koordinatlari_yerlesim_coz_e_gecer_ve_daha_hizli_yakinsar():
+    """Uçtan uca: `yerlesim_coz()`'e önceden YAKINSANMIŞ bir koordinat seti
+    verilirse, spiralden başlamaya göre DAHA AZ (ya da eşit) iterasyonda
+    yakınsamalı — 'sıfırdan değil, önceki sonuçtan devam' iddiasının
+    ölçülebilir kanıtı."""
+    komponentler = [Komponent(f"U{i}", genislik_mm=2.0, yukseklik_mm=2.0) for i in range(6)]
+    netler = [Net("BUS", [f"U{i}" for i in range(6)])]
+
+    ilk = yerlesim_coz(komponentler, netler, 40.0, 40.0)
+    assert ilk.yakinsadi_mi
+
+    tekrar = yerlesim_coz(
+        komponentler, netler, 40.0, 40.0,
+        baslangic_koordinatlari=ilk.koordinatlar,
+    )
+    assert tekrar.yakinsadi_mi
+    assert tekrar.iterasyon <= ilk.iterasyon
+
+
 def test_yerlesim_coz_deterministik():
     komponentler = [Komponent(f"U{i}") for i in range(8)]
     netler = [Net("A", ["U0", "U1"]), Net("B", ["U2", "U3", "U4"])]

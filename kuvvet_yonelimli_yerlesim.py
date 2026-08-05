@@ -276,6 +276,7 @@ def baslangic_yerlesimi_uret(
     kart_genisligi_mm: float,
     kart_yuksekligi_mm: float,
     baslangic_aci_offset_rad: float = 0.0,
+    baslangic_koordinatlari: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Dict[str, Tuple[float, float]]:
     """Altın-açı (Vogel) spirali ile DETERMİNİSTİK başlangıç yerleşimi.
 
@@ -291,8 +292,18 @@ def baslangic_yerlesimi_uret(
     offset motoru farklı bir yerel minimuma yönlendirebilir
     (`coklu_yerlesim_dene()` bunu bir parametre boyutu olarak kullanır).
 
+    `baslangic_koordinatlari` (FAZ 0.5 — anahat değişince yeniden yerleşim
+    için): verilirse, HAREKETLİ (sabit=False) bir komponentin başlangıç
+    konumu spiralden DEĞİL, bu sözlükten okunur (ref sözlükte YOKSA spirale
+    düşülür — ör. anahat değiştikten sonra netliste eklenen YENİ bir
+    komponent için önceki bir sonuç olamaz). Yeni kart sınırlarına göre
+    KIRPILIR (`min/max` — anahat küçülmüş olabilir, eski koordinat kart
+    dışında kalabilir). Amaç: mekanik anahat küçük bir değişiklik geçirdiğinde
+    yerleşimi SIFIRDAN değil, ÖNCEKİ yakınsanmış sonuçtan devam ettirmek
+    (`main.py`'nin anahat-değişimi tetikleyicisi bunu kullanır).
+
     `sabit=True` komponentlerin mevcut (x, y)'si KORUNUR — onlar kasa/mekanik
-    kısıtından geliyor, spiral onları ezmez.
+    kısıtından geliyor, spiral (veya `baslangic_koordinatlari`) onları ezmez.
     """
     if kart_genisligi_mm <= 0 or kart_yuksekligi_mm <= 0:
         raise ValueError("kart boyutları pozitif olmalı.")
@@ -305,13 +316,22 @@ def baslangic_yerlesimi_uret(
         k.ref: (k.x, k.y) for k in komponentler if k.sabit
     }
     n = max(1, len(hareketliler))
-    for i, k in enumerate(hareketliler):
-        r = maks_r * math.sqrt((i + 0.5) / n)
-        aci = i * ALTIN_ACI_RAD + baslangic_aci_offset_rad
+    spiral_sirasi = 0
+    for k in hareketliler:
+        if baslangic_koordinatlari is not None and k.ref in baslangic_koordinatlari:
+            x, y = baslangic_koordinatlari[k.ref]
+            koordinatlar[k.ref] = (
+                min(max(x, k.genislik_mm / 2.0), kart_genisligi_mm - k.genislik_mm / 2.0),
+                min(max(y, k.yukseklik_mm / 2.0), kart_yuksekligi_mm - k.yukseklik_mm / 2.0),
+            )
+            continue
+        r = maks_r * math.sqrt((spiral_sirasi + 0.5) / n)
+        aci = spiral_sirasi * ALTIN_ACI_RAD + baslangic_aci_offset_rad
         koordinatlar[k.ref] = (
             merkez_x + r * math.cos(aci),
             merkez_y + r * math.sin(aci),
         )
+        spiral_sirasi += 1
     return koordinatlar
 
 
@@ -412,6 +432,7 @@ def yerlesim_coz(
     baslangic_adimi_mm: float = 2.0,
     keepoutlar: Sequence["YuksekHizKeepout"] = (),
     baslangic_aci_offset_rad: float = 0.0,
+    baslangic_koordinatlari: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> YerlesimSonucu:
     """Force-directed yerleşim: bağlı komponentleri ÇEKER, çakışanları İTER.
 
@@ -449,6 +470,7 @@ def yerlesim_coz(
     kenarlar = netlistten_graf_kur(netler)
     koordinatlar = baslangic_yerlesimi_uret(
         komponentler, kart_genisligi_mm, kart_yuksekligi_mm, baslangic_aci_offset_rad,
+        baslangic_koordinatlari,
     )
     baslangic_ratsnest = ratsnest_uzunlugu_toplami(koordinatlar, kenarlar)
 

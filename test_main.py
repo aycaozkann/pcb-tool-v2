@@ -12,6 +12,7 @@ fail-closed dahil).
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -252,13 +253,134 @@ def test_cmd_run_drc_hatasi_varken_produce_gitmez(monkeypatch, tmp_path):
 
 
 def test_cmd_run_temiz_produce_yoksa_pass(monkeypatch, tmp_path):
-    """ERC/DRC temiz, --produce yok -> PASS(0), üretim çalışmaz."""
+    """ERC/DRC temiz, --produce yok -> PASS(0), üretim çalışmaz.
+
+    NOT: `termal_mekanik_veri.json` bilerek YAZILMADI — bu, `faz_termal_mekanik`'in
+    GERÇEK (mock'lanmamış) haliyle çalışıp KAPSAM_YOK dönmesini ve bunun
+    sonucu ENGELLEMEMESİNİ kanıtlar (bkz. `test_cmd_run_termal_veri_yoksa_kapsam_yok_engellemez`
+    ile aynı senaryo, burada dolaylı olarak da doğrulanıyor)."""
     _proje_kur(tmp_path)
     monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
     monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
     monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
     monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
     assert cmd_run(_args(tmp_path)) == 0
+
+
+def test_cmd_run_termal_veri_yoksa_kapsam_yok_engellemez(monkeypatch, tmp_path):
+    """`termal_mekanik_veri.json` yokken `faz_termal_mekanik` GERÇEK
+    (mock'lanmamış) haliyle çalışır -> KAPSAM_YOK -> ERC/DRC temizse SONUÇ
+    yine PASS(0) olmalı (KAPSAM_YOK bir engel DEĞİL)."""
+    _proje_kur(tmp_path)
+    monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
+    assert cmd_run(_args(tmp_path)) == 0
+
+
+def test_cmd_run_termal_veri_fail_ise_produce_engellenir(monkeypatch, tmp_path):
+    """`termal_mekanik_veri.json` bir ihlal (yüksek güçlü komponent + kasa
+    temas bölgesi + tanımsız B.Mask açıklığı) üretecek şekilde varsa,
+    ERC/DRC temiz olsa bile FAIL-CLOSED: --produce'a ULAŞILMAZ, sonuç 1."""
+    _proje_kur(tmp_path)
+    (tmp_path / "termal_mekanik_veri.json").write_text(json.dumps({
+        "kritik_guc_esigi_W": 0.5,
+        "komponentler": [
+            {
+                "isim": "U1", "x": 5.0, "y": 5.0, "guc_yayilimi_W": 1.0,
+                "mevcut_termal_via_sayisi": 10,
+                "b_mask_acikligi_tanimli_mi": False, "yuzey_kaplamasi": "TBD",
+            }
+        ],
+        "yuzeyler": [
+            {"isim": "boss1", "poligon": [[0, 0], [10, 0], [10, 10], [0, 10]], "z_boslugu_mm": 0.3}
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
+    assert cmd_run(_args(tmp_path, produce=True)) == 1
+
+
+def test_cmd_run_yerlesim_veri_yoksa_kapsam_yok_engellemez(monkeypatch, tmp_path):
+    """`yerlesim_veri.json` yokken `faz_yerlesim_planlama` GERÇEK
+    (mock'lanmamış) haliyle çalışır -> her iki gate de KAPSAM_YOK -> ERC/DRC
+    temizse SONUÇ yine PASS(0) olmalı."""
+    _proje_kur(tmp_path)
+    monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
+    assert cmd_run(_args(tmp_path)) == 0
+
+
+def test_cmd_run_yerlesim_cakisma_fail_ise_produce_engellenir(monkeypatch, tmp_path):
+    """`yerlesim_veri.json` iki SABİT komponenti kasıtlı olarak aynı
+    koordinata (çakışacak şekilde) tanımlarsa -> `cakisma_kontrolu` FAIL ->
+    ERC/DRC temiz olsa bile FAIL-CLOSED: --produce'a ULAŞILMAZ, sonuç 1."""
+    _proje_kur(tmp_path)
+    (tmp_path / "yerlesim_veri.json").write_text(json.dumps({
+        "kart_genisligi_mm": 40.0, "kart_yuksekligi_mm": 40.0,
+        "komponentler": [
+            {"ref": "U1", "genislik_mm": 5.0, "yukseklik_mm": 5.0, "sabit": True, "x": 20.0, "y": 20.0},
+            {"ref": "U2", "genislik_mm": 5.0, "yukseklik_mm": 5.0, "sabit": True, "x": 20.0, "y": 20.0},
+        ],
+        "netler": [], "kisitlar": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
+    assert cmd_run(_args(tmp_path, produce=True)) == 1
+
+
+def test_cmd_run_yerlesim_kisit_ihlali_fail_ise_produce_engellenir(monkeypatch, tmp_path):
+    """Sağlanamayan bir `MesafeKisiti` (maks_mm) -> `kisitlari_dogrula` FAIL
+    -> FAIL-CLOSED."""
+    _proje_kur(tmp_path)
+    (tmp_path / "yerlesim_veri.json").write_text(json.dumps({
+        "kart_genisligi_mm": 40.0, "kart_yuksekligi_mm": 40.0,
+        "komponentler": [
+            {"ref": "U1", "genislik_mm": 1.0, "yukseklik_mm": 1.0, "sabit": True, "x": 1.0, "y": 1.0},
+            {"ref": "U2", "genislik_mm": 1.0, "yukseklik_mm": 1.0, "sabit": True, "x": 39.0, "y": 39.0},
+        ],
+        "netler": [],
+        "kisitlar": [{"ref_a": "U1", "ref_b": "U2", "maks_mm": 1.0, "aciklama": "test"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
+    assert cmd_run(_args(tmp_path, produce=True)) == 1
+
+
+def test_cmd_run_yerlesim_hiyerarsi_raporu_test_dizinine_yazilir(monkeypatch, tmp_path):
+    """Gerçek bir yerleşim çalıştığında `TEST/yerlesim_raporu.md` üretilmeli
+    (insan onaylı sonraki adım için) — board'a hiçbir şey YAZILMAZ."""
+    _proje_kur(tmp_path)
+    (tmp_path / "yerlesim_veri.json").write_text(json.dumps({
+        "kart_genisligi_mm": 40.0, "kart_yuksekligi_mm": 40.0,
+        "komponentler": [
+            {"ref": "C1", "genislik_mm": 1.0, "yukseklik_mm": 0.5, "kategori": "guc_dekuplaj"},
+            {"ref": "U1", "genislik_mm": 5.0, "yukseklik_mm": 5.0, "kategori": "kritik_hs"},
+        ],
+        "netler": [{"isim": "SIG", "baglantilar": ["U1", "C1"], "agirlik": 1.0}],
+        "kisitlar": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(main, "faz_ortam", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_uretim", lambda *a, **k: pytest.fail("üretim ulaşılmamalı"))
+
+    kod = cmd_run(_args(tmp_path))
+
+    assert kod == 0
+    scratch_dosyalari = list((tmp_path / ".scratch").glob("*/TEST/yerlesim_raporu.md"))
+    assert len(scratch_dosyalari) == 1
+    icerik = scratch_dosyalari[0].read_text(encoding="utf-8")
+    assert "Force-Directed Yerleşim Raporu" in icerik
 
 
 def test_cmd_run_temiz_produce_var_sch_pcb_yoksa_2(monkeypatch, tmp_path):
@@ -427,3 +549,264 @@ def test_faz_drc_baglantisiz_netleri_yazar(monkeypatch, tmp_path, capsys):
 
     assert temiz is False
     assert "Bağlantısız netler: IMU_INT1" in cikti
+
+
+# ------------------------------------------------------------------
+# 3. cmd_sistem_atama_plani_uret — sistem_orkestratoru.py CLI köprüsü
+# ------------------------------------------------------------------
+#
+# Önceden main.py'ye HİÇ bağlı değildi (kod incelemesinde bulunan boşluk) —
+# `build_parser()` üzerinden gerçek CLI ayrıştırmasıyla test edilir.
+
+def _atama_args(**overrides):
+    varsayilanlar = dict(
+        kamera_sayisi=6, sensor_i2c_adresi="0x36",
+        deserializer_taban_hedef_adresi="0x40", deserializer_maks_kanal=8,
+        sozlesme=None, cikti=None,
+    )
+    varsayilanlar.update(overrides)
+    argv = [
+        "sistem-atama-plani-uret",
+        "--kamera-sayisi", str(varsayilanlar["kamera_sayisi"]),
+        "--sensor-i2c-adresi", varsayilanlar["sensor_i2c_adresi"],
+        "--deserializer-taban-hedef-adresi", varsayilanlar["deserializer_taban_hedef_adresi"],
+        "--deserializer-maks-kanal", str(varsayilanlar["deserializer_maks_kanal"]),
+    ]
+    if varsayilanlar["sozlesme"]:
+        argv += ["--sozlesme", varsayilanlar["sozlesme"]]
+    if varsayilanlar["cikti"]:
+        argv += ["--cikti", varsayilanlar["cikti"]]
+    return main.build_parser().parse_args(argv)
+
+
+def test_sistem_atama_plani_uret_gecerli_plan_cikti_dosyasina_yazar(tmp_path):
+    import yaml
+
+    cikti = tmp_path / "plan.yaml"
+    args = _atama_args(cikti=str(cikti))
+
+    kod = main.cmd_sistem_atama_plani_uret(args)
+
+    assert kod == 0
+    assert cikti.exists()
+    veri = yaml.safe_load(cikti.read_text(encoding="utf-8"))
+    assert veri["vc_id"]["atama"] == {f"kart_{i}": i - 1 for i in range(1, 7)}
+
+
+def test_sistem_atama_plani_uret_mevcut_sozlesmeyi_gunceller(tmp_path):
+    import yaml
+
+    sozlesme = tmp_path / "arayuz_sozlesmesi.yaml"
+    sozlesme.write_text(yaml.safe_dump({
+        "versiyon": 1,
+        "konnektor": {"pin_sayisi": 4},
+        "vc_id": {"aralik": [0, 5], "atama": {"kart_1": 99}},
+    }), encoding="utf-8")
+    args = _atama_args(sozlesme=str(sozlesme))
+
+    kod = main.cmd_sistem_atama_plani_uret(args)
+
+    assert kod == 0
+    guncel = yaml.safe_load(sozlesme.read_text(encoding="utf-8"))
+    assert guncel["konnektor"] == {"pin_sayisi": 4}  # dokunulmadı
+    assert guncel["vc_id"]["atama"]["kart_1"] == 0    # 99 DEĞİL, plandan güncellendi
+
+
+def test_sistem_atama_plani_uret_fail_ise_hicbir_dosyaya_yazmaz(tmp_path):
+    """Kanal limiti aşılırsa (9 kart > 8 kanal) plan FAIL vermeli ve
+    fail-closed: hiçbir dosya yazılmamalı."""
+    cikti = tmp_path / "plan.yaml"
+    args = _atama_args(kamera_sayisi=9, deserializer_maks_kanal=8, cikti=str(cikti))
+
+    kod = main.cmd_sistem_atama_plani_uret(args)
+
+    assert kod == 1
+    assert not cikti.exists()
+
+
+def test_sistem_atama_plani_uret_dosya_verilmezse_yine_de_calisir(tmp_path):
+    args = _atama_args()
+    assert main.cmd_sistem_atama_plani_uret(args) == 0
+
+
+# ------------------------------------------------------------------
+# 4. cmd_device_tree_uret — device_tree_uretici.py CLI köprüsü
+# ------------------------------------------------------------------
+
+def _dts_args(sozlesme, bus_haritasi_json, soc="rk3588", cikti=None):
+    argv = [
+        "device-tree-uret", "--soc", soc, "--sozlesme", str(sozlesme),
+        "--bus-haritasi", bus_haritasi_json,
+    ]
+    if cikti:
+        argv += ["--cikti", str(cikti)]
+    return main.build_parser().parse_args(argv)
+
+
+def _plan_yaz(tmp_path, kamera_sayisi=3):
+    import yaml
+
+    plan_args = _atama_args(kamera_sayisi=kamera_sayisi, cikti=str(tmp_path / "sozlesme.yaml"))
+    main.cmd_sistem_atama_plani_uret(plan_args)
+    return tmp_path / "sozlesme.yaml"
+
+
+def test_device_tree_uret_rk3588_ucdan_uca_pass_ve_dosya_yazar(tmp_path):
+    sozlesme = _plan_yaz(tmp_path, kamera_sayisi=3)
+    cikti = tmp_path / "camera.dts"
+    args = _dts_args(sozlesme, '{"1":"i2c1","2":"i2c3","3":"i2c5"}', cikti=cikti)
+
+    kod = main.cmd_device_tree_uret(args)
+
+    assert kod == 0
+    assert cikti.exists()
+    assert "&i2c1 {" in cikti.read_text(encoding="utf-8")
+
+
+def test_device_tree_uret_ambarella_kapsam_yok_dosya_yazmaz(tmp_path):
+    sozlesme = _plan_yaz(tmp_path, kamera_sayisi=1)
+    cikti = tmp_path / "camera.dts"
+    args = _dts_args(sozlesme, '{"1":"i2c1"}', soc="ambarella", cikti=cikti)
+
+    kod = main.cmd_device_tree_uret(args)
+
+    assert kod == 1
+    assert not cikti.exists()
+
+
+def test_device_tree_uret_sozlesme_yoksa_kapsam_yok(tmp_path):
+    args = _dts_args(tmp_path / "yok.yaml", '{"1":"i2c1"}')
+    assert main.cmd_device_tree_uret(args) == 1
+
+
+# ------------------------------------------------------------------
+# 5. FAZ 0.5-5: anahat-degisti-yeniden-yerlestir (mekanik DXF değişimi
+#    tetikleyicisi) — anahat_degisti_mi / faz_yerlesim_planlama'nın
+#    TEST/yerlesim_sonucu.json çıktısı / cmd_anahat_degisti_yeniden_yerlestir
+# ------------------------------------------------------------------
+
+def _yerlesim_veri_yaz(proje_dizini: Path, kart_genisligi_mm=40.0, kart_yuksekligi_mm=40.0):
+    (proje_dizini / "yerlesim_veri.json").write_text(json.dumps({
+        "kart_genisligi_mm": kart_genisligi_mm, "kart_yuksekligi_mm": kart_yuksekligi_mm,
+        "komponentler": [
+            {"ref": "U1", "genislik_mm": 2.0, "yukseklik_mm": 2.0, "kategori": "dusuk_hiz_io"},
+            {"ref": "U2", "genislik_mm": 2.0, "yukseklik_mm": 2.0, "kategori": "dusuk_hiz_io"},
+        ],
+        "netler": [{"isim": "N1", "baglantilar": ["U1", "U2"]}],
+        "kisitlar": [],
+    }), encoding="utf-8")
+
+
+def _anahat_args(proje_dizini, dxf_yolu):
+    argv = [
+        "anahat-degisti-yeniden-yerlestir",
+        "--proje-dizini", str(proje_dizini),
+        "--dxf-yolu", str(dxf_yolu),
+    ]
+    return main.build_parser().parse_args(argv)
+
+
+def test_anahat_degisti_mi_ilk_calistirmada_true():
+    """Kayıtlı bir önceki durum yoksa 'değişti' sayılır — karşılaştıracak
+    bir referans olmadığı için bu, ilk yerleşimin çalışmasını sağlar."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        proje = Path(td)
+        dxf = proje / "anahat.dxf"
+        dxf.write_text("DXF-ICERIK-1", encoding="utf-8")
+        assert main.anahat_degisti_mi(proje, dxf) is True
+
+
+def test_anahat_degisti_mi_ayni_icerikte_false(tmp_path):
+    dxf = tmp_path / "anahat.dxf"
+    dxf.write_text("DXF-ICERIK-1", encoding="utf-8")
+    main._anahat_durumunu_kaydet(tmp_path, dxf)
+    assert main.anahat_degisti_mi(tmp_path, dxf) is False
+
+
+def test_anahat_degisti_mi_farkli_icerikte_true(tmp_path):
+    dxf = tmp_path / "anahat.dxf"
+    dxf.write_text("DXF-ICERIK-1", encoding="utf-8")
+    main._anahat_durumunu_kaydet(tmp_path, dxf)
+    dxf.write_text("DXF-ICERIK-2-DEGISTI", encoding="utf-8")
+    assert main.anahat_degisti_mi(tmp_path, dxf) is True
+
+
+def test_faz_yerlesim_planlama_yerlesim_sonucu_json_yazar(tmp_path):
+    _yerlesim_veri_yaz(tmp_path)
+    main.faz_yerlesim_planlama(tmp_path)
+    sonuc_yolu = tmp_path / main.YERLESIM_SONUC_DOSYASI
+    assert sonuc_yolu.is_file()
+    veri = json.loads(sonuc_yolu.read_text(encoding="utf-8"))
+    assert set(veri["koordinatlar"].keys()) == {"U1", "U2"}
+
+
+def test_onceki_yerlesim_koordinatlarini_yukle_dosya_yoksa_none(tmp_path):
+    assert main.onceki_yerlesim_koordinatlarini_yukle(tmp_path) is None
+
+
+def test_onceki_yerlesim_koordinatlarini_yukle_yazilani_geri_okur(tmp_path):
+    _yerlesim_veri_yaz(tmp_path)
+    main.faz_yerlesim_planlama(tmp_path)
+    koord = main.onceki_yerlesim_koordinatlarini_yukle(tmp_path)
+    assert set(koord.keys()) == {"U1", "U2"}
+    assert isinstance(koord["U1"], tuple)
+
+
+def test_cmd_anahat_degisti_yeniden_yerlestir_dxf_yoksa_hata(tmp_path):
+    args = _anahat_args(tmp_path, tmp_path / "yok.dxf")
+    assert main.cmd_anahat_degisti_yeniden_yerlestir(args) == 2
+
+
+def test_cmd_anahat_degisti_yeniden_yerlestir_ilk_calistirma_yerlesimi_calistirir(tmp_path):
+    _yerlesim_veri_yaz(tmp_path)
+    dxf = tmp_path / "anahat.dxf"
+    dxf.write_text("DXF-V1", encoding="utf-8")
+
+    kod = main.cmd_anahat_degisti_yeniden_yerlestir(_anahat_args(tmp_path, dxf))
+
+    assert kod == 0
+    assert (tmp_path / main.YERLESIM_SONUC_DOSYASI).is_file()
+    assert (tmp_path / main.ANAHAT_DURUM_DOSYASI).is_file()
+
+
+def test_cmd_anahat_degisti_yeniden_yerlestir_degismezse_tekrar_calismaz(tmp_path, monkeypatch):
+    _yerlesim_veri_yaz(tmp_path)
+    dxf = tmp_path / "anahat.dxf"
+    dxf.write_text("DXF-V1", encoding="utf-8")
+
+    assert main.cmd_anahat_degisti_yeniden_yerlestir(_anahat_args(tmp_path, dxf)) == 0
+
+    monkeypatch.setattr(
+        main, "faz_yerlesim_planlama",
+        lambda *a, **k: pytest.fail("anahat değişmediyse yerleşim TEKRAR çalışmamalı"),
+    )
+    kod = main.cmd_anahat_degisti_yeniden_yerlestir(_anahat_args(tmp_path, dxf))
+    assert kod == 0
+
+
+def test_cmd_anahat_degisti_yeniden_yerlestir_degisince_oncekinden_devam_eder(tmp_path, monkeypatch):
+    """Uçtan uca kanıt: anahat değişince `faz_yerlesim_planlama`'ya BOŞ
+    OLMAYAN bir `baslangic_koordinatlari` geçirilir — ilk çalıştırmanın
+    sonucundan devam edildiğinin kanıtı."""
+    _yerlesim_veri_yaz(tmp_path)
+    dxf = tmp_path / "anahat.dxf"
+    dxf.write_text("DXF-V1", encoding="utf-8")
+    assert main.cmd_anahat_degisti_yeniden_yerlestir(_anahat_args(tmp_path, dxf)) == 0
+
+    dxf.write_text("DXF-V2-DEGISTI", encoding="utf-8")
+
+    yakalanan = {}
+    orijinal = main.faz_yerlesim_planlama
+
+    def _casus(proje_dizini, baslangic_koordinatlari=None):
+        yakalanan["baslangic_koordinatlari"] = baslangic_koordinatlari
+        return orijinal(proje_dizini, baslangic_koordinatlari=baslangic_koordinatlari)
+
+    monkeypatch.setattr(main, "faz_yerlesim_planlama", _casus)
+
+    kod = main.cmd_anahat_degisti_yeniden_yerlestir(_anahat_args(tmp_path, dxf))
+
+    assert kod == 0
+    assert yakalanan["baslangic_koordinatlari"]
+    assert set(yakalanan["baslangic_koordinatlari"].keys()) == {"U1", "U2"}
