@@ -51,8 +51,8 @@ from __future__ import annotations
 
 import heapq
 import math
-from dataclasses import dataclass
-from typing import List, Optional, Protocol, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Protocol, Sequence, Tuple
 
 # Sadece geometri fonksiyonu - pcb_carpisma_radari modülü de `import pcbnew`
 # YAPMAZ (kendi lazy-import kuralına uyar), bu yüzden bu modülün başlıktaki
@@ -62,6 +62,7 @@ from pcb_carpisma_radari import nokta_segmente_dik_mesafe
 
 Nokta = Tuple[float, float]
 IzgaraHucresi = Tuple[int, int]
+IzgaraDugum3D = Tuple[int, int, int]  # (hücre_x, hücre_y, katman_indeksi)
 
 
 class KutuBenzeri(Protocol):
@@ -231,6 +232,370 @@ def _yolu_sadelestir(yol: List[Nokta]) -> List[Nokta]:
         sonuc.append(b)
     sonuc.append(yol[-1])
     return sonuc
+
+
+# ------------------------------------------------------------------
+# 2b. DİFERANSİYEL ÇİFT (COUPLED) ROUTING
+#     (FAZ 0, cm4-io-test'in J1 diferansiyel çift ihtiyacından doğdu)
+# ------------------------------------------------------------------
+#
+# NEDEN AYRI İKİ A* DEĞİL: P ve N net'lerini BAĞIMSIZ iki
+# `izgara_a_yildiz_ara()` çağrısıyla rotalamak aralarındaki gap'i SABİT
+# TUTAMAZ — iki arama farklı yollar seçebilir (farklı engel etrafından
+# dolanabilir), bu da noktasal olarak gap'in daralıp genişlemesine (empedans
+# süreksizliği, EMI) yol açar. Bu fonksiyon TEK bir A* aramasını P/N
+# ÇİFTİNİN MERKEZ HATTI üzerinde yapar, sonra HER segment boyunca dik
+# ofsetle iki paralel yol türetir — gap MATEMATİKSEL OLARAK sabit kalır.
+#
+# STUB STRATEJİSİ: dar pitch'li bir konnektörde (ör. 0.4mm) P/N pad'leri
+# arasındaki mesafe, coupled koridorun ihtiyaç duyduğu (genislik_mm*2 +
+# gap_mm) mesafeden küçük olabilir. Çözüm: önce her net KISA BAĞIMSIZ bir
+# stub ile (pad'den diğer nete UZAKLAŞAN yönde, `stub_uzunluk_mm`) açılır,
+# stub'ların bittiği noktaların ORTA NOKTASI merkez-hat aramasının
+# başlangıcı/bitişi olur.
+
+def _perpendikuler_birim_vektor(a: Nokta, b: Nokta) -> Tuple[float, float]:
+    """`a->b` segmentine DİK birim vektör (90° saat yönünün tersi)."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    uzunluk = math.hypot(dx, dy)
+    if uzunluk < 1e-9:
+        return (0.0, 0.0)
+    return (-dy / uzunluk, dx / uzunluk)
+
+
+def _merkez_hattan_cift_uret(merkez_yol: List[Nokta], yaricap_mm: float) -> Tuple[List[Nokta], List[Nokta]]:
+    """Bir merkez-hat polyline'ından, HER segmentin kendi yönüne dik
+    ofsetle iki paralel yol (P: +yaricap, N: -yaricap) üretir.
+
+    SINIR (dürüstlük notu): köşelerde (segment yönü değiştiğinde) komşu
+    iki segmentin ofset yönleri ORTALAMASI alınır (basit bir miter/bevel
+    karışımı) — gerçek bir miter-join hesabı DEĞİLDİR, keskin köşelerde
+    P/N yolları arasında `yaricap_mm` mertebesinde küçük bir geometrik
+    hata OLUŞABİLİR. Bu, coupled routing'in kabul edilen bir sınırıdır;
+    kritik keskin-köşe senaryolarında elle gözden geçirilmeli."""
+    if len(merkez_yol) < 2:
+        return list(merkez_yol), list(merkez_yol)
+
+    p_yol: List[Nokta] = []
+    n_yol: List[Nokta] = []
+    for i, nokta in enumerate(merkez_yol):
+        if i == 0:
+            nx, ny = _perpendikuler_birim_vektor(merkez_yol[0], merkez_yol[1])
+        elif i == len(merkez_yol) - 1:
+            nx, ny = _perpendikuler_birim_vektor(merkez_yol[-2], merkez_yol[-1])
+        else:
+            n1x, n1y = _perpendikuler_birim_vektor(merkez_yol[i - 1], nokta)
+            n2x, n2y = _perpendikuler_birim_vektor(nokta, merkez_yol[i + 1])
+            nx, ny = (n1x + n2x) / 2.0, (n1y + n2y) / 2.0
+            norm = math.hypot(nx, ny)
+            if norm > 1e-9:
+                nx, ny = nx / norm, ny / norm
+        p_yol.append((nokta[0] + nx * yaricap_mm, nokta[1] + ny * yaricap_mm))
+        n_yol.append((nokta[0] - nx * yaricap_mm, nokta[1] - ny * yaricap_mm))
+    return p_yol, n_yol
+
+
+@dataclass
+class CoupledAramaSonucu:
+    p_yolu: List[Nokta]
+    n_yolu: List[Nokta]
+    merkez_hat_sonucu: AramaSonucu
+    bulundu_mu: bool
+    neden: str = ""
+
+
+def izgara_a_yildiz_ara_coupled(
+    p_baslangic: Nokta,
+    n_baslangic: Nokta,
+    p_bitis: Nokta,
+    n_bitis: Nokta,
+    genislik_mm: float,
+    gap_mm: float,
+    engeller: Sequence[KutuBenzeri] = (),
+    hucre_mm: float = 0.1,
+    clearance_mm: float = 0.2,
+    maks_dugum: int = 200_000,
+    stub_uzunluk_mm: float = 0.5,
+) -> CoupledAramaSonucu:
+    """P/N net çiftini SABİT `gap_mm` ile TEK bir arama olarak rotalar
+    (bkz. dosya başlığı "DİFERANSİYEL ÇİFT" notu).
+
+    1) Her net kendi pad'inden (`p_baslangic`/`n_baslangic` ve
+       `p_bitis`/`n_bitis`) `stub_uzunluk_mm` kadar DİĞER netten
+       UZAKLAŞAN yönde düz bir stub ile açılır (dar pad pitch'i coupled
+       koridora "yayar"). `stub_uzunluk_mm=0` verilirse stub atlanır —
+       çağıran taraf zaten birleşme noktalarını hesaplamışsa bunu
+       kullanabilir.
+    2) Stub'ların orta noktaları arasında (`merkez_bas`/`merkez_bit`)
+       TEK bir `izgara_a_yildiz_ara()` çağrısı yapılır; `engeller` için
+       kullanılan `clearance_mm`, TÜM coupled koridoru (P+gap+N) kapsayacak
+       şekilde `clearance_mm + gap_mm/2 + genislik_mm` olarak genişletilir
+       (muhafazakâr bir yaklaşım — köşelerde koridor genişliği TAM
+       korunmayabilir, bkz. `_merkez_hattan_cift_uret` notu).
+    3) Bulunan merkez hattan `_merkez_hattan_cift_uret()` ile P/N yolları
+       türetilir, orijinal pad noktalarıyla (stub) birleştirilip
+       sadeleştirilir.
+    """
+    if stub_uzunluk_mm < 0:
+        raise ValueError("stub_uzunluk_mm negatif olamaz")
+    if genislik_mm <= 0 or gap_mm <= 0:
+        raise ValueError("genislik_mm ve gap_mm pozitif olmalı")
+
+    def _stub_uygula(baslangic: Nokta, diger_net_noktasi: Nokta, uzunluk: float) -> Nokta:
+        if uzunluk <= 1e-9:
+            return baslangic
+        dx = baslangic[0] - diger_net_noktasi[0]
+        dy = baslangic[1] - diger_net_noktasi[1]
+        d = math.hypot(dx, dy)
+        if d < 1e-9:
+            return baslangic
+        return (baslangic[0] + dx / d * uzunluk, baslangic[1] + dy / d * uzunluk)
+
+    p_birlesme_bas = _stub_uygula(p_baslangic, n_baslangic, stub_uzunluk_mm)
+    n_birlesme_bas = _stub_uygula(n_baslangic, p_baslangic, stub_uzunluk_mm)
+    p_birlesme_bit = _stub_uygula(p_bitis, n_bitis, stub_uzunluk_mm)
+    n_birlesme_bit = _stub_uygula(n_bitis, p_bitis, stub_uzunluk_mm)
+
+    merkez_bas = ((p_birlesme_bas[0] + n_birlesme_bas[0]) / 2.0, (p_birlesme_bas[1] + n_birlesme_bas[1]) / 2.0)
+    merkez_bit = ((p_birlesme_bit[0] + n_birlesme_bit[0]) / 2.0, (p_birlesme_bit[1] + n_birlesme_bit[1]) / 2.0)
+
+    yaricap_mm = gap_mm / 2.0 + genislik_mm / 2.0
+    koridor_clearance_mm = clearance_mm + yaricap_mm
+
+    merkez_sonuc = izgara_a_yildiz_ara(
+        merkez_bas, merkez_bit, engeller, hucre_mm=hucre_mm,
+        clearance_mm=koridor_clearance_mm, maks_dugum=maks_dugum,
+    )
+    if not merkez_sonuc.bulundu_mu:
+        return CoupledAramaSonucu([], [], merkez_sonuc, False, merkez_sonuc.neden)
+
+    p_yol_ic, n_yol_ic = _merkez_hattan_cift_uret(list(merkez_sonuc.yol), yaricap_mm)
+    p_yol = _yolu_sadelestir([p_baslangic] + p_yol_ic + [p_bitis])
+    n_yol = _yolu_sadelestir([n_baslangic] + n_yol_ic + [n_bitis])
+
+    return CoupledAramaSonucu(p_yol, n_yol, merkez_sonuc, True)
+
+
+# ------------------------------------------------------------------
+# 2c. VIA YERLEŞİM GEÇERLİLİĞİ (annular-ring + hole-to-hole)
+#     (0.5mm via'nın 0.4mm pin pitch'inde 221 DRC ihlaline yol açtığı
+#     bir olaydan sonra eklendi — bu kontrol PROJEDE DAHA ÖNCE YOKTU)
+# ------------------------------------------------------------------
+
+@dataclass
+class ViaYerlesimKontrolu:
+    via_capi_mm: float
+    delik_capi_mm: float
+    min_annular_ring_mm: float = 0.15
+    min_hole_to_hole_mm: float = 0.2
+
+    def annular_ring_mm(self) -> float:
+        return (self.via_capi_mm - self.delik_capi_mm) / 2.0
+
+    def annular_ring_yeterli_mi(self) -> bool:
+        return self.annular_ring_mm() >= self.min_annular_ring_mm
+
+
+def via_yerlesimi_gecerli_mi(
+    aday_nokta: Nokta,
+    via_capi_mm: float,
+    delik_capi_mm: float,
+    komsu_delikler: Sequence[Tuple[float, float, float]] = (),
+    min_annular_ring_mm: float = 0.15,
+    min_hole_to_hole_mm: float = 0.2,
+) -> Tuple[bool, str]:
+    """Bir via yerleştirme adayının annular-ring VE hole-to-hole clearance
+    açısından geçerli olup olmadığını kontrol eder — döner: `(gecerli_mi,
+    sebep)`. `sebep` sadece `gecerli_mi=False` iken doludur.
+
+    `komsu_delikler`, board üzerindeki DİĞER delik/via merkezlerinin
+    `(x_mm, y_mm, delik_capi_mm)` listesidir — pad delikleri DAHİL
+    edilmelidir (0.5mm via'nın 0.4mm pin pitch'inde 221 ihlale yol açtığı
+    olayda tam olarak BU kontrol eksikti: via'nın komşu pad deliklerine
+    olan mesafesi hiç ölçülmüyordu). Merkezler-arası mesafe
+    `via_yaricap + komsu_yaricap + min_hole_to_hole_mm`'den KÜÇÜKSE ihlal.
+    """
+    kontrol = ViaYerlesimKontrolu(via_capi_mm, delik_capi_mm, min_annular_ring_mm, min_hole_to_hole_mm)
+    if not kontrol.annular_ring_yeterli_mi():
+        return False, (
+            f"annular ring yetersiz: {kontrol.annular_ring_mm():.4f}mm < "
+            f"{min_annular_ring_mm}mm (via_capi={via_capi_mm}mm, delik={delik_capi_mm}mm)"
+        )
+    for kx, ky, komsu_cap in komsu_delikler:
+        mesafe = math.hypot(aday_nokta[0] - kx, aday_nokta[1] - ky)
+        gerekli = (via_capi_mm / 2.0) + (komsu_cap / 2.0) + min_hole_to_hole_mm
+        if mesafe < gerekli:
+            return False, (
+                f"hole-to-hole clearance ihlali: ({kx:.3f},{ky:.3f}) konumundaki komşu "
+                f"delikten {mesafe:.4f}mm mesafede, gerekli >= {gerekli:.4f}mm "
+                f"(via_yaricap={via_capi_mm / 2.0}mm + komsu_yaricap={komsu_cap / 2.0}mm + "
+                f"min_hole_to_hole={min_hole_to_hole_mm}mm)"
+            )
+    return True, ""
+
+
+# ------------------------------------------------------------------
+# 2d. KATMAN/VIA-FARKINDALI A*
+#     (arama durumu artık (hücre, katman) — via kullanmanın maliyeti var
+#     VE via_yerlesimi_gecerli_mi() geçmeyen bir nokta via YERİ olarak
+#     hiç ÜRETİLMEZ, sonradan filtrelenmez)
+# ------------------------------------------------------------------
+
+def _sezgisel3d(a: IzgaraDugum3D, b: IzgaraDugum3D) -> float:
+    """2D octile sezgi + katman farkı sezgiye KATKI YAPMAZ (0 varsayılır)
+    — A*'ın kabul edilebilirliği (sezgi asla gerçek maliyeti AŞMAMALI)
+    için gerekli; katman farkını sezgiye eklemek `via_maliyeti`'ni tahmin
+    etmeyi gerektirir ve YANLIŞLIKLA gerçek maliyeti AŞARSA A* optimal
+    olmayan bir yol bulabilir. Bu basitleştirme A*'ı Dijkstra'ya biraz
+    YAKLAŞTIRIR (potansiyel olarak daha fazla düğüm gezilir) ama asla
+    YANLIŞ/optimal-olmayan bir yol BULMAZ."""
+    return _sezgisel((a[0], a[1]), (b[0], b[1]))
+
+
+@dataclass
+class KatmanliAramaSonucu:
+    yol: List[Tuple[float, float, int]]  # (x_mm, y_mm, katman_indeksi)
+    via_konumlari: List[Nokta]
+    dugum_sayisi: int
+    bulundu_mu: bool
+    neden: str = ""
+
+
+def izgara_a_yildiz_ara_katmanli(
+    baslangic: Nokta,
+    bitis: Nokta,
+    katman_sayisi: int = 2,
+    baslangic_katman: int = 0,
+    bitis_katman: int = 0,
+    katman_engelleri: Optional[Dict[int, Sequence[KutuBenzeri]]] = None,
+    hucre_mm: float = 0.1,
+    clearance_mm: float = 0.2,
+    maks_dugum: int = 200_000,
+    via_maliyeti: float = 5.0,
+    via_capi_mm: float = 0.5,
+    via_delik_capi_mm: float = 0.3,
+    komsu_delikler: Sequence[Tuple[float, float, float]] = (),
+    min_annular_ring_mm: float = 0.15,
+    min_hole_to_hole_mm: float = 0.2,
+) -> KatmanliAramaSonucu:
+    """`izgara_a_yildiz_ara()`'nın KATMAN-farkında genişlemesi.
+
+    Arama durumu `(hücre_x, hücre_y, katman)` üçlüsüdür. Aynı katmanda
+    hareket normal 8-yönlü maliyetle (1.0/√2) devam eder; KATMAN
+    DEĞİŞTİRMEK (via açmak) `via_maliyeti` EK maliyet öder VE o (x,y)
+    noktası `via_yerlesimi_gecerli_mi()`'den GEÇMEDİĞİ SÜRECE bir komşu
+    olarak ÜRETİLMEZ bile — annular-ring/hole-to-hole ihlali üretecek bir
+    yol hiç ARANMAZ, sonradan filtrelenmez (bkz. dosya başlığı: bu kontrol
+    projede DAHA ÖNCE HİÇ YOKTU, 221-ihlallik gerçek bir olayın nedeniydi).
+
+    `katman_engelleri`, `{katman_indeksi: [engel, ...]}` biçiminde HER
+    katmanın KENDİ engel listesini taşır — sözlükte olmayan bir katman
+    engelsiz kabul edilir.
+    """
+    if katman_sayisi < 1:
+        raise ValueError("katman_sayisi >= 1 olmalı")
+    if not (0 <= baslangic_katman < katman_sayisi and 0 <= bitis_katman < katman_sayisi):
+        raise ValueError("baslangic_katman/bitis_katman [0, katman_sayisi) aralığında olmalı")
+
+    katman_engelleri = katman_engelleri or {}
+
+    bas_h = _hucreye_cevir(baslangic, hucre_mm)
+    bit_h = _hucreye_cevir(bitis, hucre_mm)
+    bas_dugum: IzgaraDugum3D = (bas_h[0], bas_h[1], baslangic_katman)
+    bit_dugum: IzgaraDugum3D = (bit_h[0], bit_h[1], bitis_katman)
+
+    def _katman_engelli_mi(hucre: IzgaraHucresi, katman: int) -> bool:
+        return _hucre_engelli_mi(hucre, katman_engelleri.get(katman, ()), hucre_mm, clearance_mm)
+
+    if _katman_engelli_mi(bas_h, baslangic_katman):
+        return KatmanliAramaSonucu([], [], 0, False, "başlangıç noktası engelli bölgede")
+    if _katman_engelli_mi(bit_h, bitis_katman):
+        return KatmanliAramaSonucu([], [], 0, False, "bitiş noktası engelli bölgede")
+    if bas_dugum == bit_dugum:
+        return KatmanliAramaSonucu(
+            [(baslangic[0], baslangic[1], baslangic_katman), (bitis[0], bitis[1], bitis_katman)],
+            [], 0, True,
+        )
+
+    via_gecerlilik_onbellegi: Dict[IzgaraHucresi, Tuple[bool, str]] = {}
+
+    def _via_gecerli_mi(hucre: IzgaraHucresi) -> Tuple[bool, str]:
+        if hucre not in via_gecerlilik_onbellegi:
+            nokta = _noktaya_cevir(hucre, hucre_mm)
+            via_gecerlilik_onbellegi[hucre] = via_yerlesimi_gecerli_mi(
+                nokta, via_capi_mm, via_delik_capi_mm, komsu_delikler,
+                min_annular_ring_mm, min_hole_to_hole_mm,
+            )
+        return via_gecerlilik_onbellegi[hucre]
+
+    acik: List[Tuple[float, float, IzgaraDugum3D]] = [(_sezgisel3d(bas_dugum, bit_dugum), 0.0, bas_dugum)]
+    geldigi: dict = {bas_dugum: None}
+    g_skoru: dict = {bas_dugum: 0.0}
+    ziyaret_edildi: set = set()
+
+    while acik:
+        if len(ziyaret_edildi) > maks_dugum:
+            return KatmanliAramaSonucu([], [], len(ziyaret_edildi), False, f"düğüm bütçesi ({maks_dugum}) aşıldı")
+
+        _, mevcut_g, mevcut = heapq.heappop(acik)
+        if mevcut in ziyaret_edildi:
+            continue
+        ziyaret_edildi.add(mevcut)
+
+        if mevcut == bit_dugum:
+            dugum_yol: List[IzgaraDugum3D] = []
+            n: Optional[IzgaraDugum3D] = mevcut
+            while n is not None:
+                dugum_yol.append(n)
+                n = geldigi[n]
+            dugum_yol.reverse()
+
+            yol_mm: List[Tuple[float, float, int]] = [
+                (*_noktaya_cevir((d[0], d[1]), hucre_mm), d[2]) for d in dugum_yol
+            ]
+            yol_mm[0] = (baslangic[0], baslangic[1], baslangic_katman)
+            yol_mm[-1] = (bitis[0], bitis[1], bitis_katman)
+            via_konumlari = [
+                _noktaya_cevir((dugum_yol[i][0], dugum_yol[i][1]), hucre_mm)
+                for i in range(1, len(dugum_yol))
+                if dugum_yol[i][2] != dugum_yol[i - 1][2]
+            ]
+            return KatmanliAramaSonucu(yol_mm, via_konumlari, len(ziyaret_edildi), True)
+
+        mx, my, mk = mevcut
+
+        for dx, dy, maliyet in _YONLER:
+            komsu_h = (mx + dx, my + dy)
+            komsu: IzgaraDugum3D = (komsu_h[0], komsu_h[1], mk)
+            if komsu in ziyaret_edildi:
+                continue
+            if _katman_engelli_mi(komsu_h, mk):
+                continue
+            aday_g = mevcut_g + maliyet
+            if aday_g < g_skoru.get(komsu, float("inf")):
+                g_skoru[komsu] = aday_g
+                geldigi[komsu] = mevcut
+                f = aday_g + _sezgisel3d(komsu, bit_dugum)
+                heapq.heappush(acik, (f, aday_g, komsu))
+
+        gecerli, _sebep = _via_gecerli_mi((mx, my))
+        if gecerli:
+            for hedef_katman in range(katman_sayisi):
+                if hedef_katman == mk:
+                    continue
+                komsu = (mx, my, hedef_katman)
+                if komsu in ziyaret_edildi:
+                    continue
+                if _katman_engelli_mi((mx, my), hedef_katman):
+                    continue
+                aday_g = mevcut_g + via_maliyeti
+                if aday_g < g_skoru.get(komsu, float("inf")):
+                    g_skoru[komsu] = aday_g
+                    geldigi[komsu] = mevcut
+                    f = aday_g + _sezgisel3d(komsu, bit_dugum)
+                    heapq.heappush(acik, (f, aday_g, komsu))
+
+    return KatmanliAramaSonucu([], [], len(ziyaret_edildi), False, "engelsiz yol bulunamadı (arama tükendi)")
 
 
 # ------------------------------------------------------------------

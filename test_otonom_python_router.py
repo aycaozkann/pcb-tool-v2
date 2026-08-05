@@ -15,9 +15,17 @@ import pytest
 
 from otonom_python_router import (
     AramaSonucu,
+    CoupledAramaSonucu,
+    KatmanliAramaSonucu,
+    ViaYerlesimKontrolu,
     izgara_a_yildiz_ara,
+    izgara_a_yildiz_ara_coupled,
+    izgara_a_yildiz_ara_katmanli,
     oz_testleri_calistir,
+    via_yerlesimi_gecerli_mi,
     _hucre_engelli_mi,
+    _merkez_hattan_cift_uret,
+    _perpendikuler_birim_vektor,
     _yolu_sadelestir,
 )
 from pcb_carpisma_radari import IzEngeli
@@ -124,3 +132,174 @@ class TestIkiAsamaliCarpismaTesti:
         kapali = Kutu(-1.0, -1.0, 1.0, 1.0)
         s = izgara_a_yildiz_ara((0.0, 0.0), (10.0, 0.0), [kapali], hucre_mm=0.5, clearance_mm=0.1)
         assert not s.bulundu_mu  # SinirKutusu hâlâ katı cisim gibi davranıyor
+
+
+# ------------------------------------------------------------------
+# FAZ 0 — Diferansiyel çift (coupled) routing
+# ------------------------------------------------------------------
+
+class TestPerpendikulerVeMerkezHattanCift:
+    def test_yatay_segmente_dik_vektor_dikeydir(self):
+        nx, ny = _perpendikuler_birim_vektor((0.0, 0.0), (10.0, 0.0))
+        assert nx == pytest.approx(0.0, abs=1e-9)
+        assert abs(ny) == pytest.approx(1.0, abs=1e-9)
+
+    def test_sifir_uzunluklu_segment_sifir_vektor_doner(self):
+        assert _perpendikuler_birim_vektor((1.0, 1.0), (1.0, 1.0)) == (0.0, 0.0)
+
+    def test_merkez_hattan_uretilen_cift_sabit_yaricapta(self):
+        merkez = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]
+        p_yol, n_yol = _merkez_hattan_cift_uret(merkez, yaricap_mm=0.15)
+        assert len(p_yol) == len(n_yol) == 3
+        # ilk noktada P/N arası mesafe TAM 2*yaricap olmalı
+        ilk_mesafe = math.dist(p_yol[0], n_yol[0])
+        assert ilk_mesafe == pytest.approx(0.3, abs=1e-6)
+
+
+class TestIzgaraAYildizAraCoupled:
+    def test_engelsiz_coupled_routing_gap_sabit_kalir(self):
+        s = izgara_a_yildiz_ara_coupled(
+            (0.0, 0.2), (0.0, -0.2), (10.0, 0.2), (10.0, -0.2),
+            genislik_mm=0.15, gap_mm=0.15, hucre_mm=0.2, clearance_mm=0.1,
+            stub_uzunluk_mm=0.5,
+        )
+        assert s.bulundu_mu
+        beklenen_gap = 0.15 + 0.15  # gap_mm + genislik_mm (merkez-merkez)
+        # coupled koridorun İÇ noktalarında (stub sonrası) P/N arası mesafe
+        # yaklaşık sabit olmalı — ilk/son nokta (pad'in kendisi) stub
+        # geometrisi yüzünden farklı olabilir, bu yüzden ORTA noktalar
+        # karşılaştırılır.
+        assert len(s.p_yolu) >= 2 and len(s.n_yolu) >= 2
+        ic_p, ic_n = s.p_yolu[1], s.n_yolu[1]
+        assert math.dist(ic_p, ic_n) == pytest.approx(beklenen_gap, abs=1e-6)
+
+    def test_stub_uzunlugu_sifirsa_pad_dogrudan_merkez_hatta_baglanir(self):
+        s = izgara_a_yildiz_ara_coupled(
+            (0.0, 0.075), (0.0, -0.075), (10.0, 0.075), (10.0, -0.075),
+            genislik_mm=0.15, gap_mm=0.15, hucre_mm=0.2, clearance_mm=0.1,
+            stub_uzunluk_mm=0.0,
+        )
+        assert s.bulundu_mu
+
+    def test_engel_varsa_koridor_genisligi_hesaba_katilarak_dolanir(self):
+        duvar = Kutu(4.0, -5.0, 5.0, 5.0)
+        s = izgara_a_yildiz_ara_coupled(
+            (0.0, 0.2), (0.0, -0.2), (10.0, 0.2), (10.0, -0.2),
+            genislik_mm=0.15, gap_mm=0.15, engeller=(duvar,),
+            hucre_mm=0.25, clearance_mm=0.15, stub_uzunluk_mm=0.5,
+        )
+        assert s.bulundu_mu
+        assert s.merkez_hat_sonucu.bulundu_mu
+
+    def test_gecersiz_parametreler_reddedilir(self):
+        with pytest.raises(ValueError):
+            izgara_a_yildiz_ara_coupled((0, 0), (0, -1), (10, 0), (10, -1), genislik_mm=0.0, gap_mm=0.15)
+        with pytest.raises(ValueError):
+            izgara_a_yildiz_ara_coupled((0, 0), (0, -1), (10, 0), (10, -1), genislik_mm=0.15, gap_mm=-0.1)
+        with pytest.raises(ValueError):
+            izgara_a_yildiz_ara_coupled((0, 0), (0, -1), (10, 0), (10, -1), genislik_mm=0.15, gap_mm=0.15, stub_uzunluk_mm=-1.0)
+
+    def test_fault_injection_tam_ortayi_kapatan_duvar_bulunamaz(self):
+        tam_duvar = Kutu(4.0, -1000.0, 5.0, 1000.0)
+        s = izgara_a_yildiz_ara_coupled(
+            (0.0, 0.2), (0.0, -0.2), (10.0, 0.2), (10.0, -0.2),
+            genislik_mm=0.15, gap_mm=0.15, engeller=(tam_duvar,),
+            hucre_mm=0.25, clearance_mm=0.15, stub_uzunluk_mm=0.5,
+        )
+        assert not s.bulundu_mu
+
+
+# ------------------------------------------------------------------
+# FAZ 0 — Via yerleşim geçerliliği (annular-ring + hole-to-hole)
+# ------------------------------------------------------------------
+
+class TestViaYerlesimiGecerliMi:
+    def test_yetersiz_annular_ring_reddedilir(self):
+        gecerli, sebep = via_yerlesimi_gecerli_mi(
+            (0.0, 0.0), via_capi_mm=0.5, delik_capi_mm=0.3, min_annular_ring_mm=0.15,
+        )
+        assert gecerli is False
+        assert "annular ring" in sebep
+
+    def test_yeterli_annular_ring_ve_bos_komsu_kabul_edilir(self):
+        gecerli, sebep = via_yerlesimi_gecerli_mi(
+            (0.0, 0.0), via_capi_mm=0.5, delik_capi_mm=0.2, komsu_delikler=(), min_annular_ring_mm=0.15,
+        )
+        assert gecerli is True
+        assert sebep == ""
+
+    def test_0_4mm_pin_pitch_senaryosu_hole_to_hole_ihlali_yakalar(self):
+        """REGRESYON KİLİDİ: 0.5mm via'nın 0.4mm pin pitch'inde 221 DRC
+        ihlaline yol açtığı gerçek olay — bu kontrol projede DAHA ÖNCE
+        YOKTU, bu test onun VARLIĞINI ve DOĞRULUĞUNU kilitler."""
+        gecerli, sebep = via_yerlesimi_gecerli_mi(
+            (0.0, 0.0), via_capi_mm=0.5, delik_capi_mm=0.2,
+            komsu_delikler=[(0.4, 0.0, 0.3)], min_annular_ring_mm=0.15, min_hole_to_hole_mm=0.2,
+        )
+        assert gecerli is False
+        assert "hole-to-hole" in sebep
+
+    def test_uzak_komsu_delik_sorun_cikarmaz(self):
+        gecerli, _ = via_yerlesimi_gecerli_mi(
+            (0.0, 0.0), via_capi_mm=0.5, delik_capi_mm=0.2, komsu_delikler=[(5.0, 5.0, 0.3)],
+        )
+        assert gecerli is True
+
+    def test_via_yerlesim_kontrolu_dataclass_annular_ring_hesabi(self):
+        k = ViaYerlesimKontrolu(via_capi_mm=0.6, delik_capi_mm=0.3)
+        assert k.annular_ring_mm() == pytest.approx(0.15)
+        assert k.annular_ring_yeterli_mi() is True
+
+
+# ------------------------------------------------------------------
+# FAZ 0 — Katman/via-farkındalı A*
+# ------------------------------------------------------------------
+
+class TestIzgaraAYildizAraKatmanli:
+    def test_tek_katmanda_engelsiz_yol_via_kullanmaz(self):
+        s = izgara_a_yildiz_ara_katmanli((0.0, 0.0), (5.0, 0.0), katman_sayisi=2, hucre_mm=0.5)
+        assert s.bulundu_mu
+        assert s.via_konumlari == []
+
+    def test_engel_via_ile_asilir(self):
+        duvar = Kutu(2.0, -1000.0, 3.0, 1000.0)  # katman 0'ı TAM kapatan duvar
+        s = izgara_a_yildiz_ara_katmanli(
+            (0.0, 0.0), (5.0, 0.0), katman_sayisi=2,
+            katman_engelleri={0: [duvar]}, hucre_mm=0.5, clearance_mm=0.2,
+            via_capi_mm=0.5, via_delik_capi_mm=0.2,
+        )
+        assert s.bulundu_mu
+        assert len(s.via_konumlari) >= 1
+
+    def test_via_gecersizse_engeli_asamaz(self):
+        """Via yerleşimi (annular-ring) HER YERDE geçersizse (çok küçük
+        annular ring), katman değişimi hiç DENENMEMELİ — engel katman
+        0'ı kapatıyorsa ve katman 1 de aynı engelle kapalıysa yol
+        bulunamamalı (via üretilemediği için katman değiştirilemiyor)."""
+        duvar = Kutu(2.0, -1000.0, 3.0, 1000.0)
+        s = izgara_a_yildiz_ara_katmanli(
+            (0.0, 0.0), (5.0, 0.0), katman_sayisi=2,
+            katman_engelleri={0: [duvar], 1: [duvar]},  # HER İKİ katman da kapalı
+            hucre_mm=0.5, clearance_mm=0.2, via_capi_mm=0.5, via_delik_capi_mm=0.2,
+        )
+        assert not s.bulundu_mu
+
+    def test_katman_sayisi_gecersizse_hata(self):
+        with pytest.raises(ValueError):
+            izgara_a_yildiz_ara_katmanli((0, 0), (5, 0), katman_sayisi=0)
+        with pytest.raises(ValueError):
+            izgara_a_yildiz_ara_katmanli((0, 0), (5, 0), katman_sayisi=2, baslangic_katman=5)
+
+    def test_ayni_hucre_ve_katmanda_kisayol(self):
+        s = izgara_a_yildiz_ara_katmanli((0.0, 0.0), (0.02, 0.02), katman_sayisi=2, hucre_mm=0.5)
+        assert s.bulundu_mu
+        assert s.dugum_sayisi == 0
+
+    def test_fault_injection_baslangic_ustune_engel(self):
+        engel = Kutu(-0.5, -0.5, 0.5, 0.5)
+        s = izgara_a_yildiz_ara_katmanli(
+            (0.0, 0.0), (5.0, 0.0), katman_sayisi=2,
+            katman_engelleri={0: [engel]}, hucre_mm=0.5, clearance_mm=0.1,
+        )
+        assert not s.bulundu_mu
+        assert "engelli bölgede" in s.neden
