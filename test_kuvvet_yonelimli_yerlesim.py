@@ -16,10 +16,14 @@ from kuvvet_yonelimli_yerlesim import (
     MesafeKisiti,
     Net,
     YerlesimKategorisi,
+    YerlesimParametreSeti,
+    YerlesimSkoru,
     YuksekHizKeepout,
     YUKSEK_HIZLI_VARSAYILAN_AGIRLIK,
+    VARSAYILAN_PARAMETRE_SETLERI,
     baslangic_yerlesimi_uret,
     cakisma_kontrolu,
+    coklu_yerlesim_dene,
     duzlem_neti_mi,
     hiyerarsik_yerlesim_coz,
     keepout_cakismasi_kontrolu,
@@ -31,6 +35,7 @@ from kuvvet_yonelimli_yerlesim import (
     termal_kisitlarini_uret,
     yerlesim_coz,
     yerlesim_raporu_uret,
+    yerlesim_skoru,
     yuksek_hiz_keepout_hesapla,
     yuksek_hiz_keepout_kontrolu,
     yuksek_hizli_net_mi,
@@ -577,3 +582,118 @@ def test_yerlesim_coz_keepout_ihlalini_reddeder():
     # test hiçbir şey ölçmüyor demektir - fault-injection disiplini).
     xk, yk = sonuc_keepoutsuz.koordinatlar["R1"]
     assert math.hypot(xk - 25.0, yk - 20.0) < 8.0 + r1_yaricap
+
+
+# ------------------------------------------------------------------
+# FAZ 0.5-1: baslangic_aci_offset_rad
+# ------------------------------------------------------------------
+
+class TestBaslangicAciOffset:
+    def test_offset_sifirsa_eski_davranisla_ayni(self):
+        komponentler = [Komponent(f"U{i}") for i in range(5)]
+        a = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0)
+        b = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0, baslangic_aci_offset_rad=0.0)
+        assert a == b
+
+    def test_farkli_offset_farkli_baslangic_uretir_ama_deterministik(self):
+        komponentler = [Komponent(f"U{i}") for i in range(5)]
+        a = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0, baslangic_aci_offset_rad=0.0)
+        b = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0, baslangic_aci_offset_rad=math.pi / 3)
+        assert a != b
+        # aynı offset -> aynı sonuç (determinizm)
+        b2 = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0, baslangic_aci_offset_rad=math.pi / 3)
+        assert b == b2
+
+    def test_sabit_komponent_offsetten_etkilenmez(self):
+        komponentler = [Komponent("J1", x=1.0, y=2.0, sabit=True), Komponent("U1")]
+        a = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0, baslangic_aci_offset_rad=0.0)
+        b = baslangic_yerlesimi_uret(komponentler, 40.0, 40.0, baslangic_aci_offset_rad=1.0)
+        assert a["J1"] == b["J1"] == (1.0, 2.0)
+
+
+# ------------------------------------------------------------------
+# FAZ 0.5-1: yerlesim_skoru / coklu_yerlesim_dene
+# ------------------------------------------------------------------
+
+class TestYerlesimSkoru:
+    def test_ratsnest_uzunlugu_dogrudan_skora_yansir(self):
+        komponentler = [Komponent(f"U{i}") for i in range(4)]
+        netler = [Net("A", ["U0", "U1"])]
+        sonuc = yerlesim_coz(komponentler, netler, 30.0, 30.0)
+        skor = yerlesim_skoru(sonuc, netler, komponentler)
+        assert skor.ratsnest_mm == sonuc.son_ratsnest_mm
+        assert skor.toplam_skor >= skor.ratsnest_mm  # diğer terimler negatif OLAMAZ
+
+    def test_keepout_ihlali_skoru_agir_cezalandirir(self):
+        komponentler = [Komponent("A"), Komponent("B", x=5.0, y=5.0)]
+        netler = [Net("SIG", ["A", "B"])]
+        koordinatlar = {"A": (0.0, 0.0), "B": (5.0, 5.0)}
+        from kuvvet_yonelimli_yerlesim import YerlesimSonucu
+        sonuc = YerlesimSonucu(koordinatlar, 1, True, 0.0, 10.0, 10.0)
+
+        keepout_yok = yerlesim_skoru(sonuc, netler, komponentler, keepoutlar=[])
+        keepout_var = yerlesim_skoru(
+            sonuc, netler, komponentler,
+            keepoutlar=[YuksekHizKeepout("HS", 2.5, 2.5, 10.0)],  # her ikisini de kapsar
+        )
+        assert keepout_var.keepout_ihlal_sayisi == 2
+        assert keepout_var.toplam_skor > keepout_yok.toplam_skor
+
+    def test_termal_kisit_ihlali_skoru_yukseltir(self):
+        from kuvvet_yonelimli_yerlesim import YerlesimSonucu
+        sonuc = YerlesimSonucu({"U1": (0.0, 0.0), "_CAPA": (10.0, 0.0)}, 1, True, 0.0, 5.0, 5.0)
+        kisit_gevsek = [MesafeKisiti("U1", "_CAPA", maks_mm=20.0)]
+        kisit_siki = [MesafeKisiti("U1", "_CAPA", maks_mm=5.0)]
+
+        skor_gevsek = yerlesim_skoru(sonuc, [], [], termal_kisitlar=kisit_gevsek)
+        skor_siki = yerlesim_skoru(sonuc, [], [], termal_kisitlar=kisit_siki)
+        assert skor_siki.termal_yayilim_skoru > skor_gevsek.termal_yayilim_skoru
+
+    def test_hs_net_kompakt_degilse_skor_yukselir(self):
+        from kuvvet_yonelimli_yerlesim import YerlesimSonucu
+        netler = [Net("MIPI_D0_P", ["U0", "U1"])]
+        yakin = YerlesimSonucu({"U0": (0.0, 0.0), "U1": (1.0, 0.0)}, 1, True, 0.0, 1.0, 1.0)
+        uzak = YerlesimSonucu({"U0": (0.0, 0.0), "U1": (30.0, 0.0)}, 1, True, 0.0, 30.0, 30.0)
+
+        skor_yakin = yerlesim_skoru(yakin, netler, [])
+        skor_uzak = yerlesim_skoru(uzak, netler, [])
+        assert skor_uzak.hs_kompaktlik_skoru > skor_yakin.hs_kompaktlik_skoru
+
+
+class TestCokluYerlesimDene:
+    def test_determinizm_ayni_netlist_ayni_sonuc(self):
+        komponentler = [Komponent(f"U{i}") for i in range(8)]
+        netler = [Net("A", ["U0", "U1"]), Net("B", ["U2", "U3", "U4"])]
+
+        s1 = coklu_yerlesim_dene(komponentler, netler, 40.0, 40.0)
+        s2 = coklu_yerlesim_dene([Komponent(f"U{i}") for i in range(8)], netler, 40.0, 40.0)
+
+        assert s1.en_iyi_isim == s2.en_iyi_isim
+        assert s1.tum_sonuclar[s1.en_iyi_isim].koordinatlar == s2.tum_sonuclar[s2.en_iyi_isim].koordinatlar
+
+    def test_tum_parametre_setleri_icin_sonuc_ve_skor_doner(self):
+        komponentler = [Komponent(f"U{i}") for i in range(6)]
+        netler = [Net("A", ["U0", "U1"])]
+        sonuc = coklu_yerlesim_dene(komponentler, netler, 40.0, 40.0)
+        assert set(sonuc.tum_sonuclar) == {p.isim for p in VARSAYILAN_PARAMETRE_SETLERI}
+        assert set(sonuc.tum_skorlar) == {p.isim for p in VARSAYILAN_PARAMETRE_SETLERI}
+
+    def test_en_iyi_isim_gercekten_en_dusuk_skora_sahip(self):
+        komponentler = [Komponent(f"U{i}") for i in range(6)]
+        netler = [Net("A", ["U0", "U1"]), Net("B", ["U2", "U3"])]
+        sonuc = coklu_yerlesim_dene(komponentler, netler, 40.0, 40.0)
+        en_dusuk = min(s.toplam_skor for s in sonuc.tum_skorlar.values())
+        assert sonuc.tum_skorlar[sonuc.en_iyi_isim].toplam_skor == en_dusuk
+
+    def test_ozel_parametre_seti_verilebilir(self):
+        komponentler = [Komponent(f"U{i}") for i in range(4)]
+        netler = [Net("A", ["U0", "U1"])]
+        ozel = [YerlesimParametreSeti("tek_deneme", cekim_katsayisi=0.1)]
+        sonuc = coklu_yerlesim_dene(komponentler, netler, 30.0, 30.0, parametre_setleri=ozel)
+        assert sonuc.en_iyi_isim == "tek_deneme"
+        assert list(sonuc.tum_sonuclar) == ["tek_deneme"]
+
+    def test_bos_parametre_listesi_reddedilir(self):
+        komponentler = [Komponent("U0")]
+        with pytest.raises(ValueError):
+            coklu_yerlesim_dene(komponentler, [], 30.0, 30.0, parametre_setleri=[])

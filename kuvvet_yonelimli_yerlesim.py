@@ -275,6 +275,7 @@ def baslangic_yerlesimi_uret(
     komponentler: Sequence[Komponent],
     kart_genisligi_mm: float,
     kart_yuksekligi_mm: float,
+    baslangic_aci_offset_rad: float = 0.0,
 ) -> Dict[str, Tuple[float, float]]:
     """Altın-açı (Vogel) spirali ile DETERMİNİSTİK başlangıç yerleşimi.
 
@@ -282,6 +283,13 @@ def baslangic_yerlesimi_uret(
     spirali, noktaları kart alanına düzgün (kümelenmesiz) dağıtır — bu,
     force-directed motorun ilk iterasyonlarında yapay bir "her şey üst üste"
     itme patlaması yaşamamasını sağlar.
+
+    `baslangic_aci_offset_rad` (FAZ 0.5 — çoklu yerleşim seçeneği için):
+    spiralin BAŞLANGIÇ açısını döndürür. `random` KULLANMADAN farklı
+    "başlangıç konfigürasyonları" üretmenin yolu budur — aynı offset her
+    zaman aynı spirali üretir (hâlâ tam deterministik), ama FARKLI bir
+    offset motoru farklı bir yerel minimuma yönlendirebilir
+    (`coklu_yerlesim_dene()` bunu bir parametre boyutu olarak kullanır).
 
     `sabit=True` komponentlerin mevcut (x, y)'si KORUNUR — onlar kasa/mekanik
     kısıtından geliyor, spiral onları ezmez.
@@ -299,7 +307,7 @@ def baslangic_yerlesimi_uret(
     n = max(1, len(hareketliler))
     for i, k in enumerate(hareketliler):
         r = maks_r * math.sqrt((i + 0.5) / n)
-        aci = i * ALTIN_ACI_RAD
+        aci = i * ALTIN_ACI_RAD + baslangic_aci_offset_rad
         koordinatlar[k.ref] = (
             merkez_x + r * math.cos(aci),
             merkez_y + r * math.sin(aci),
@@ -403,6 +411,7 @@ def yerlesim_coz(
     yakinsama_esigi_mm: float = 0.01,
     baslangic_adimi_mm: float = 2.0,
     keepoutlar: Sequence["YuksekHizKeepout"] = (),
+    baslangic_aci_offset_rad: float = 0.0,
 ) -> YerlesimSonucu:
     """Force-directed yerleşim: bağlı komponentleri ÇEKER, çakışanları İTER.
 
@@ -438,7 +447,9 @@ def yerlesim_coz(
         return YerlesimSonucu({}, 0, False, 0.0, 0.0, 0.0)
 
     kenarlar = netlistten_graf_kur(netler)
-    koordinatlar = baslangic_yerlesimi_uret(komponentler, kart_genisligi_mm, kart_yuksekligi_mm)
+    koordinatlar = baslangic_yerlesimi_uret(
+        komponentler, kart_genisligi_mm, kart_yuksekligi_mm, baslangic_aci_offset_rad,
+    )
     baslangic_ratsnest = ratsnest_uzunlugu_toplami(koordinatlar, kenarlar)
 
     ref_haritasi = {k.ref: k for k in komponentler}
@@ -845,6 +856,196 @@ def yuksek_hiz_keepout_kontrolu(
         ihlaller=[{"ref": r} for r in ihlal_refleri],
         detay=f"{len(keepoutlar)} yüksek hızlı keepout bölgesine karşı "
               f"{len(komponentler)} komponent test edildi (3W kuralı)",
+    )
+
+
+# ------------------------------------------------------------------
+# 7. ÇOKLU YERLEŞİM SEÇENEĞİ + SKORLAMA (FAZ 0.5)
+# ------------------------------------------------------------------
+#
+# NEDEN BU BÖLÜM VAR: force-directed motor TEK bir yerel minimuma yakınsar
+# (başlangıç açısı/kuvvet katsayıları sabitse HER ZAMAN AYNI yerel minimum —
+# bu determinizmin doğal sonucu). Ama "iyi bir yerleşim" tek bir sayıya
+# (ratsnest uzunluğu) indirgenemez — keepout ihlali, termal risk, HS net
+# kompaktlığı da önemlidir. Bu bölüm, aynı netlist'i FARKLI parametre
+# setleriyle (hâlâ HER BİRİ kendi içinde tam deterministik — `random`
+# HİÇBİR YERDE kullanılmaz) N kez çözüp çok-boyutlu bir skorla sıralar.
+
+@dataclass
+class YerlesimParametreSeti:
+    """Bir yerleşim DENEMESİ için parametre demeti — `coklu_yerlesim_dene()`
+    aynı netlist'i bu demetlerin HER BİRİYLE ayrı ayrı çözer."""
+
+    isim: str
+    cekim_katsayisi: float = 0.08
+    itme_katsayisi: float = 1.0
+    baslangic_adimi_mm: float = 2.0
+    baslangic_aci_offset_rad: float = 0.0
+
+
+# 4 varsayılan deneme: standart, güçlü çekim (daha sıkı kümeleme), güçlü
+# itme (daha ferah/az çakışma riski), farklı başlangıç açısı (spiral
+# offset — motor farklı bir yerel minimuma inebilir). Çağıran taraf
+# kendi setini de verebilir; bunlar sadece "hiç düşünmeden N dene"
+# isteyen bir çağıran için makul bir varsayılandır.
+VARSAYILAN_PARAMETRE_SETLERI: Tuple[YerlesimParametreSeti, ...] = (
+    YerlesimParametreSeti("standart", cekim_katsayisi=0.08, itme_katsayisi=1.0),
+    YerlesimParametreSeti("guclu_cekim", cekim_katsayisi=0.16, itme_katsayisi=1.0),
+    YerlesimParametreSeti("guclu_itme", cekim_katsayisi=0.08, itme_katsayisi=2.0),
+    YerlesimParametreSeti("farkli_baslangic", cekim_katsayisi=0.08, itme_katsayisi=1.0,
+                           baslangic_aci_offset_rad=math.pi / 3.0),
+)
+
+
+@dataclass
+class YerlesimSkoru:
+    parametre_seti_ismi: str
+    toplam_skor: float
+    ratsnest_mm: float
+    keepout_ihlal_sayisi: int
+    termal_yayilim_skoru: float
+    hs_kompaktlik_skoru: float
+
+
+def yerlesim_skoru(
+    sonuc: YerlesimSonucu,
+    netler: Sequence[Net],
+    komponentler: Sequence[Komponent] = (),
+    keepoutlar: Sequence["YuksekHizKeepout"] = (),
+    termal_kisitlar: Sequence[MesafeKisiti] = (),
+    parametre_seti_ismi: str = "",
+    agirlik_ratsnest: float = 1.0,
+    agirlik_keepout: float = 50.0,
+    agirlik_termal: float = 1.0,
+    agirlik_hs_kompaktlik: float = 1.0,
+) -> YerlesimSkoru:
+    """Bir yerleşim SONUCUNU tek bir sayıya indirger — DÜŞÜK = İYİ.
+    `coklu_yerlesim_dene()`'nin "en iyi" seçimi bu skora göre yapılır.
+
+    Bileşenler:
+      - **ratsnest_mm**: `sonuc.son_ratsnest_mm` (zaten ağırlıklı toplam
+        hava-hattı) — doğrudan kullanılır.
+      - **keepout_ihlal_sayisi**: `keepout_cakismasi_kontrolu()` ihlal
+        sayısı — varsayılan katsayı (50x) BİLEREK AĞIRDIR: bu SERT bir
+        kabul kriteridir (Bölüm 6), "biraz ihlal" diye bir kategori YOKTUR,
+        skor bunu yansıtmalı.
+      - **termal_yayilim_skoru**: `termal_kisitlar` (ör.
+        `termal_kisitlarini_uret()`'ten) verilmişse, HER kısıtın GERÇEK
+        mesafesinin `maks_mm`'e ORANI toplanır (1.0'a yakın/üstü = riskli).
+        SINIR: bu GERÇEK bir termal simülasyon DEĞİLDİR — sadece Faz 4b'nin
+        kendi mm kısıtına göre "ne kadar sınırda" kaldığını ölçer (bkz.
+        FAZ 0.5-4, `ecad_mcad_termal_kopru.py`'deki RθJA hesabı bu skoru
+        İLERİDE daha doğru bir termal veriyle besleyebilir, şu an İÇİN
+        BAĞLI DEĞİL).
+      - **hs_kompaktlik_skoru**: her yüksek-hızlı net grubunun kendi
+        bounding-box köşegeni toplanır — küçük köşegen "kompakt/kolay
+        yönlendirilebilir" demektir.
+
+    Toplam skor ağırlıklı TOPLAMDIR (düşük = iyi).
+    """
+    ihlal_sayisi = 0
+    if keepoutlar and komponentler:
+        komponent_haritasi = {k.ref: k for k in komponentler}
+        ihlal_sayisi = len(
+            keepout_cakismasi_kontrolu(sonuc.koordinatlar, komponent_haritasi, list(keepoutlar))
+        )
+
+    termal_skoru = 0.0
+    for kisit in termal_kisitlar:
+        if kisit.maks_mm is None:
+            continue
+        if kisit.ref_a not in sonuc.koordinatlar or kisit.ref_b not in sonuc.koordinatlar:
+            continue
+        ax, ay = sonuc.koordinatlar[kisit.ref_a]
+        bx, by = sonuc.koordinatlar[kisit.ref_b]
+        d = math.hypot(ax - bx, ay - by)
+        termal_skoru += d / kisit.maks_mm
+
+    hs_kompaktlik = 0.0
+    for net in netler:
+        if not yuksek_hizli_net_mi(net.isim):
+            continue
+        pinler = [p for p in sorted(set(net.baglantilar)) if p in sonuc.koordinatlar]
+        if len(pinler) < 2:
+            continue
+        xs = [sonuc.koordinatlar[p][0] for p in pinler]
+        ys = [sonuc.koordinatlar[p][1] for p in pinler]
+        hs_kompaktlik += math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+    toplam = (
+        agirlik_ratsnest * sonuc.son_ratsnest_mm
+        + agirlik_keepout * ihlal_sayisi
+        + agirlik_termal * termal_skoru
+        + agirlik_hs_kompaktlik * hs_kompaktlik
+    )
+    return YerlesimSkoru(
+        parametre_seti_ismi=parametre_seti_ismi,
+        toplam_skor=round(toplam, 4),
+        ratsnest_mm=sonuc.son_ratsnest_mm,
+        keepout_ihlal_sayisi=ihlal_sayisi,
+        termal_yayilim_skoru=round(termal_skoru, 4),
+        hs_kompaktlik_skoru=round(hs_kompaktlik, 4),
+    )
+
+
+@dataclass
+class CokluYerlesimSonucu:
+    en_iyi_isim: str
+    en_iyi_sonuc: YerlesimSonucu
+    tum_sonuclar: Dict[str, YerlesimSonucu]
+    tum_skorlar: Dict[str, YerlesimSkoru]
+
+
+def coklu_yerlesim_dene(
+    komponentler: Sequence[Komponent],
+    netler: Sequence[Net],
+    kart_genisligi_mm: float,
+    kart_yuksekligi_mm: float,
+    kisitlar: Sequence[MesafeKisiti] = (),
+    keepoutlar: Sequence["YuksekHizKeepout"] = (),
+    termal_kisitlar: Sequence[MesafeKisiti] = (),
+    parametre_setleri: Sequence[YerlesimParametreSeti] = VARSAYILAN_PARAMETRE_SETLERI,
+    **ortak_kwargs,
+) -> CokluYerlesimSonucu:
+    """Aynı netlist'i `parametre_setleri`'ndeki HER parametre demetiyle AYRI
+    AYRI çözer — HER biri kendi içinde TAM DETERMİNİSTİKTİR (aynı parametre
+    seti + aynı netlist -> HER ZAMAN aynı sonuç, `random` hiçbir yerde
+    kullanılmaz); `parametre_setleri` arasında ÇEŞİTLİLİK vardır (bu, motoru
+    farklı yerel minimumlara yönlendirir), rastgelelik YOKTUR.
+
+    `yerlesim_skoru()` ile HER sonuç puanlanır, EN DÜŞÜK skor (en iyi)
+    önerilir — ama TÜM sonuçlar (skorlarıyla) `tum_sonuclar`/`tum_skorlar`
+    içinde döner: "tek cevap" dayatılmaz, çağıran taraf (insan/ajan) neden
+    A yerine B'nin önerildiğini görebilir.
+    """
+    if not parametre_setleri:
+        raise ValueError("en az bir parametre seti verilmeli")
+
+    tum_sonuclar: Dict[str, YerlesimSonucu] = {}
+    tum_skorlar: Dict[str, YerlesimSkoru] = {}
+    for pset in parametre_setleri:
+        sonuc = yerlesim_coz(
+            komponentler, netler, kart_genisligi_mm, kart_yuksekligi_mm, kisitlar,
+            cekim_katsayisi=pset.cekim_katsayisi,
+            itme_katsayisi=pset.itme_katsayisi,
+            baslangic_adimi_mm=pset.baslangic_adimi_mm,
+            baslangic_aci_offset_rad=pset.baslangic_aci_offset_rad,
+            keepoutlar=keepoutlar,
+            **ortak_kwargs,
+        )
+        skor = yerlesim_skoru(
+            sonuc, netler, komponentler, keepoutlar=keepoutlar,
+            termal_kisitlar=termal_kisitlar, parametre_seti_ismi=pset.isim,
+        )
+        tum_sonuclar[pset.isim] = sonuc
+        tum_skorlar[pset.isim] = skor
+
+    en_iyi_isim = min(tum_skorlar, key=lambda isim: tum_skorlar[isim].toplam_skor)
+    return CokluYerlesimSonucu(
+        en_iyi_isim=en_iyi_isim,
+        en_iyi_sonuc=tum_sonuclar[en_iyi_isim],
+        tum_sonuclar=tum_sonuclar,
+        tum_skorlar=tum_skorlar,
     )
 
 
