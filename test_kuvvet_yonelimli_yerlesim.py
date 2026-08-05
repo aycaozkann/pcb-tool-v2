@@ -8,20 +8,32 @@ import pytest
 
 from bulgu_sozlesmesi import BulguDurumu
 
+from ecad_mcad_termal_kopru import KomponentTermalDurumu, TermalTemasBolgesi
+from pcb_stackup_planner import TermalYonetim
+
 from kuvvet_yonelimli_yerlesim import (
     Komponent,
     MesafeKisiti,
     Net,
+    YerlesimKategorisi,
+    YuksekHizKeepout,
+    YUKSEK_HIZLI_VARSAYILAN_AGIRLIK,
     baslangic_yerlesimi_uret,
     cakisma_kontrolu,
     duzlem_neti_mi,
+    hiyerarsik_yerlesim_coz,
+    keepout_cakismasi_kontrolu,
     kisitlari_dogrula,
     kumeleri_bul,
     netlistten_graf_kur,
     oz_testleri_calistir,
     ratsnest_uzunlugu_toplami,
+    termal_kisitlarini_uret,
     yerlesim_coz,
     yerlesim_raporu_uret,
+    yuksek_hiz_keepout_hesapla,
+    yuksek_hiz_keepout_kontrolu,
+    yuksek_hizli_net_mi,
     _testin_bos_olmadigini_kanitla,
 )
 
@@ -303,3 +315,265 @@ def test_fault_injection_gercekten_kirilir():
 
 def test_oz_testleri_temiz():
     assert oz_testleri_calistir() == []
+
+
+# ------------------------------------------------------------------
+# hiyerarsik_yerlesim_coz (main.py Faz 4 entegrasyonu, 2026-08-03)
+# ------------------------------------------------------------------
+
+def test_hiyerarsik_yerlesim_tum_kategorileri_yerlestirir():
+    komponentler = [Komponent(f"U{i}") for i in range(6)]
+    kategoriler = {
+        "U0": YerlesimKategorisi.GUC_DEKUPLAJ, "U1": YerlesimKategorisi.GUC_DEKUPLAJ,
+        "U2": YerlesimKategorisi.KRITIK_HS, "U3": YerlesimKategorisi.KRITIK_HS,
+        "U4": YerlesimKategorisi.DUSUK_HIZ_IO, "U5": YerlesimKategorisi.DUSUK_HIZ_IO,
+    }
+    netler = [Net("A", ["U0", "U1"]), Net("B", ["U2", "U3"]), Net("C", ["U4", "U5"])]
+    sonuc = hiyerarsik_yerlesim_coz(komponentler, kategoriler, netler, 40.0, 40.0)
+    assert set(sonuc.koordinatlar) == {"U0", "U1", "U2", "U3", "U4", "U5"}
+
+
+def test_hiyerarsik_yerlesim_onceki_asama_kilitlenir():
+    """Güç/dekuplaj (U0/U1) aşaması bittikten sonra, HS aşamasında (U2/U3)
+    U0/U1'in konumu DEĞİŞMEMELİ — sonraki aşamalar önceki aşamayı sabit
+    kilitler, geriye doğru hareket ettirmez."""
+    komponentler = [Komponent(f"U{i}") for i in range(4)]
+    kategoriler = {
+        "U0": YerlesimKategorisi.GUC_DEKUPLAJ, "U1": YerlesimKategorisi.GUC_DEKUPLAJ,
+        "U2": YerlesimKategorisi.KRITIK_HS, "U3": YerlesimKategorisi.KRITIK_HS,
+    }
+    netler = [Net("A", ["U0", "U1"]), Net("B", ["U1", "U2"]), Net("C", ["U2", "U3"])]
+
+    sadece_guc = hiyerarsik_yerlesim_coz(
+        komponentler[:2], {"U0": YerlesimKategorisi.GUC_DEKUPLAJ, "U1": YerlesimKategorisi.GUC_DEKUPLAJ},
+        [Net("A", ["U0", "U1"])], 40.0, 40.0,
+    )
+    tam = hiyerarsik_yerlesim_coz(komponentler, kategoriler, netler, 40.0, 40.0)
+
+    assert tam.koordinatlar["U0"] == sadece_guc.koordinatlar["U0"]
+    assert tam.koordinatlar["U1"] == sadece_guc.koordinatlar["U1"]
+
+
+def test_hiyerarsik_yerlesim_kategorisiz_sabit_komponent_korunur():
+    sabit_konnektor = Komponent("J1", 10.0, 5.0, x=35.0, y=35.0, sabit=True)
+    hareketli = Komponent("U0")
+    kategoriler = {"U0": YerlesimKategorisi.GUC_DEKUPLAJ}
+    netler = [Net("A", ["U0", "J1"])]
+    sonuc = hiyerarsik_yerlesim_coz([sabit_konnektor, hareketli], kategoriler, netler, 40.0, 40.0)
+    assert sonuc.koordinatlar["J1"] == (35.0, 35.0)
+
+
+def test_hiyerarsik_yerlesim_bos_komponent_listesi():
+    sonuc = hiyerarsik_yerlesim_coz([], {}, [], 40.0, 40.0)
+    assert sonuc.koordinatlar == {}
+    assert sonuc.iterasyon == 0
+
+
+def test_hiyerarsik_yerlesim_ratsnest_iyilesir():
+    komponentler = [Komponent(f"U{i}") for i in range(6)]
+    kategoriler = {
+        "U0": YerlesimKategorisi.GUC_DEKUPLAJ, "U1": YerlesimKategorisi.GUC_DEKUPLAJ,
+        "U2": YerlesimKategorisi.KRITIK_HS, "U3": YerlesimKategorisi.KRITIK_HS,
+        "U4": YerlesimKategorisi.DUSUK_HIZ_IO, "U5": YerlesimKategorisi.DUSUK_HIZ_IO,
+    }
+    netler = [Net("A", ["U0", "U1"]), Net("B", ["U2", "U3"]), Net("C", ["U4", "U5"])]
+    sonuc = hiyerarsik_yerlesim_coz(komponentler, kategoriler, netler, 40.0, 40.0)
+    assert sonuc.son_ratsnest_mm < sonuc.baslangic_ratsnest_mm
+
+
+# ------------------------------------------------------------------
+# termal_kisitlarini_uret (Faz 4b termal keepout -> yerleşim GİRDİSİ)
+# ------------------------------------------------------------------
+
+_KARE_YUZEY = TermalTemasBolgesi(
+    isim="heatsink_boss_1", poligon=[(0, 0), (10, 0), (10, 10), (0, 10)], z_boslugu_mm=0.3,
+)
+
+
+def _termal_durum(isim: str, x: float, y: float, guc_w: float = 1.0) -> KomponentTermalDurumu:
+    return KomponentTermalDurumu(
+        yonetim=TermalYonetim(isim=isim, guc_yayilimi_W=guc_w, mevcut_termal_via_sayisi=10),
+        x=x, y=y,
+    )
+
+
+def test_termal_kisitlarini_uret_yuzey_disindaki_komponent_kisit_uretmez():
+    komponentler, kisitlar = termal_kisitlarini_uret([_termal_durum("U1", 50.0, 50.0)], [_KARE_YUZEY])
+    assert komponentler == []
+    assert kisitlar == []
+
+
+def test_termal_kisitlarini_uret_yuzey_icindeki_komponent_kisit_uretir():
+    komponentler, kisitlar = termal_kisitlarini_uret([_termal_durum("U1", 5.0, 5.0)], [_KARE_YUZEY])
+    assert len(komponentler) == 1
+    assert komponentler[0].sabit is True
+    assert komponentler[0].x == 5.0 and komponentler[0].y == 5.0  # kare merkezi
+    assert len(kisitlar) == 1
+    assert kisitlar[0].ref_a == "U1"
+    assert kisitlar[0].ref_b == komponentler[0].ref
+    assert kisitlar[0].maks_mm == 3.0
+
+
+def test_termal_kisitlarini_uret_veri_yoksa_bos_doner():
+    komponentler, kisitlar = termal_kisitlarini_uret([], [])
+    assert komponentler == []
+    assert kisitlar == []
+
+
+def test_termal_kisiti_yerlesime_gercekten_girdi_olur():
+    """Üretilen (çapa komponent + kısıt), `yerlesim_coz()`'e geçince ısı
+    kaynağı komponenti kasa temas merkezine GERÇEKTEN çeker — sadece
+    veri üretimi değil, motora fiilen etki ettiğinin kanıtı."""
+    komponentler, kisitlar = termal_kisitlarini_uret(
+        [_termal_durum("U1", 35.0, 35.0)],
+        [TermalTemasBolgesi(isim="boss", poligon=[(5, 5), (9, 5), (9, 9), (5, 9)], z_boslugu_mm=0.3)],
+        maks_mesafe_mm=1.0,
+    )
+    hareketli = Komponent("U1", x=35.0, y=35.0)
+    sonuc = yerlesim_coz([hareketli] + komponentler, [], 40.0, 40.0, kisitlar=kisitlar)
+    ux, uy = sonuc.koordinatlar["U1"]
+    # Başlangıçta (35,35) idi; çapa (7,7) civarında -> yaklaşmış olmalı.
+    assert math.hypot(ux - 35.0, uy - 35.0) > 5.0
+
+
+# ------------------------------------------------------------------
+# HighSpeedRuleManager (Bölüm 6)
+# ------------------------------------------------------------------
+
+def test_yuksek_hizli_net_mi_diff_class():
+    assert yuksek_hizli_net_mi("HERHANGI_BIR_ISIM", net_class="DIFF_90OHM")
+
+
+def test_yuksek_hizli_net_mi_csi_mipi_isim():
+    assert yuksek_hizli_net_mi("CAM0_CSI_D0")
+    assert yuksek_hizli_net_mi("MIPI_CLK")
+
+
+def test_yuksek_hizli_net_mi_p_n_kuyruk():
+    assert yuksek_hizli_net_mi("HDMI0_TX0_P")
+    assert yuksek_hizli_net_mi("ETH_TRD0_N")
+
+
+def test_yuksek_hizli_net_mi_tek_karakter_govde_false_positive_onlenir():
+    """`A_P` gibi 1 karakterlik gövdeli isimler kazara diferansiyel
+    sayılmamalı - spesifikasyonun açıkça istediği false-positive önlemi."""
+    assert not yuksek_hizli_net_mi("A_P")
+    assert not yuksek_hizli_net_mi("N")
+
+
+def test_yuksek_hizli_net_mi_sıradan_net_false():
+    assert not yuksek_hizli_net_mi("GPIO5")
+    assert not yuksek_hizli_net_mi("I2C_SCL")
+
+
+def test_netlistten_graf_kur_yuksek_hizli_net_agirlik_otomatik_yukselir():
+    """Elle agirlik verilmemiş (varsayılan 1.0) bir HS net, normal bir
+    net'ten daha ağır bir kenar üretmeli - kullanıcı `agirlik=` yazmak
+    ZORUNDA kalmamalı (görev A'nın ana amacı)."""
+    kenarlar = netlistten_graf_kur([
+        Net("HDMI0_TX0_P", ["U1", "U2"]),
+        Net("GPIO5", ["U3", "U4"]),
+    ])
+    assert kenarlar[("U1", "U2")] > kenarlar[("U3", "U4")]
+    assert kenarlar[("U1", "U2")] == pytest.approx(YUKSEK_HIZLI_VARSAYILAN_AGIRLIK)
+
+
+def test_netlistten_graf_kur_elle_verilen_agirlik_ezilmez():
+    """Kullanıcı bilinçli olarak agirlik=1.0 DIŞINDA bir değer verdiyse
+    (örn. 0.5), otomatik HS yükseltmesi o değere DOKUNMAMALI."""
+    kenarlar = netlistten_graf_kur([Net("HDMI0_TX0_P", ["U1", "U2"], agirlik=0.5)])
+    assert kenarlar[("U1", "U2")] == pytest.approx(0.5)
+
+
+def test_yuksek_hiz_keepout_hesapla_normal_net_icin_bos_doner():
+    keepoutlar = yuksek_hiz_keepout_hesapla(
+        Net("GPIO5", ["U1", "U2"]), {"U1": (0.0, 0.0), "U2": (10.0, 0.0)}, iz_genisligi_mm=0.2,
+    )
+    assert keepoutlar == []
+
+
+def test_yuksek_hiz_keepout_hesapla_merkez_ve_yaricap():
+    keepoutlar = yuksek_hiz_keepout_hesapla(
+        Net("HDMI0_TX0_P", ["U1", "U2"]), {"U1": (0.0, 0.0), "U2": (10.0, 0.0)}, iz_genisligi_mm=0.2,
+    )
+    assert len(keepoutlar) == 1
+    kp = keepoutlar[0]
+    assert kp.merkez_x_mm == pytest.approx(5.0)
+    assert kp.merkez_y_mm == pytest.approx(0.0)
+    assert kp.yaricap_mm == pytest.approx(0.2 * 3.0 + 0.15)
+    assert kp.kaynak_ref == "U1" and kp.hedef_ref == "U2"
+
+
+def test_keepout_cakismasi_kontrolu_ucuncu_komponent_ihlal_eder():
+    keepoutlar = [YuksekHizKeepout("TRD0", 5.0, 0.0, 1.0, kaynak_ref="D4", hedef_ref="D6")]
+    komponentler = {
+        "D4": Komponent("D4", 2.0, 2.0),
+        "D6": Komponent("D6", 2.0, 2.0),
+        "R1": Komponent("R1", 2.0, 2.0),
+    }
+    koordinatlar = {"D4": (0.0, 0.0), "D6": (10.0, 0.0), "R1": (5.0, 0.0)}
+    ihlaller = keepout_cakismasi_kontrolu(koordinatlar, komponentler, keepoutlar)
+    assert ihlaller == ["R1"]
+
+
+def test_keepout_cakismasi_kontrolu_kendi_uclari_ihlal_sayilmaz():
+    """D4/D6 - keepout'un KENDİ kaynak/hedefi - keepout'un merkezine ne
+    kadar yakın olurlarsa olsunlar ihlalci sayılmamalı (bkz. YuksekHizKeepout
+    docstring'i - aksi halde HER keepout kendi uçlarına karşı anlamsızca
+    FAIL verirdi)."""
+    keepoutlar = [YuksekHizKeepout("TRD0", 5.0, 0.0, 100.0, kaynak_ref="D4", hedef_ref="D6")]
+    komponentler = {"D4": Komponent("D4", 2.0, 2.0), "D6": Komponent("D6", 2.0, 2.0)}
+    koordinatlar = {"D4": (0.0, 0.0), "D6": (10.0, 0.0)}
+    assert keepout_cakismasi_kontrolu(koordinatlar, komponentler, keepoutlar) == []
+
+
+def test_yuksek_hiz_keepout_kontrolu_bulgu_sarmalayici():
+    keepoutlar = [YuksekHizKeepout("TRD0", 5.0, 0.0, 1.0, kaynak_ref="D4", hedef_ref="D6")]
+    komponentler = {"D4": Komponent("D4", 2.0, 2.0), "R1": Komponent("R1", 2.0, 2.0)}
+    koordinatlar = {"D4": (0.0, 0.0), "R1": (5.0, 0.0)}
+    bulgu = yuksek_hiz_keepout_kontrolu(koordinatlar, komponentler, keepoutlar)
+    assert bulgu.kontrol == "yuksek_hiz_keepout_ihlali"
+    assert bulgu.durum == BulguDurumu.FAIL
+    assert bulgu.ihlaller == [{"ref": "R1"}]
+
+
+def test_yuksek_hiz_keepout_kontrolu_kapsam_yok_komponent_bossa():
+    bulgu = yuksek_hiz_keepout_kontrolu({}, {}, [])
+    assert bulgu.durum == BulguDurumu.KAPSAM_YOK
+
+
+def test_yerlesim_coz_keepout_ihlalini_reddeder():
+    """FAULT-INJECTION BENZERİ KANIT: keepout olmadan güçlü bir çekim R1'i
+    D4-D6 arasındaki koridora çeker (courtyard'lar çakışmadığı için itme
+    devreye girmez); keepout VERİLDİĞİNDE aynı senaryoda R1 koridorun
+    dışında KALMALI - yumuşak kuvvetin ezemediği somut bir kanıt."""
+    komponentler = [
+        Komponent("D4", 2.0, 2.0, x=5.0, y=20.0, sabit=True),
+        Komponent("D6", 2.0, 2.0, x=45.0, y=20.0, sabit=True),
+        Komponent("R1", 1.0, 1.0, x=25.0, y=5.0),
+    ]
+    # R1, D4 VE D6'nın İKİSİNE de bağlı -> keepout'suz denge noktası D4-D6
+    # ORTASINA (tam olarak koridorun içine) çeker.
+    netler = [
+        Net("SIG_A", ["D4", "R1"], agirlik=20.0),
+        Net("SIG_B", ["D6", "R1"], agirlik=20.0),
+    ]
+
+    keepoutlar = [YuksekHizKeepout("TRD0", 25.0, 20.0, 8.0, kaynak_ref="D4", hedef_ref="D6")]
+
+    sonuc_keepoutsuz = yerlesim_coz(komponentler, netler, 50.0, 50.0, maks_iterasyon=200)
+    sonuc_keepoutlu = yerlesim_coz(
+        komponentler, netler, 50.0, 50.0, maks_iterasyon=200, keepoutlar=keepoutlar,
+    )
+
+    x, y = sonuc_keepoutlu.koordinatlar["R1"]
+    mesafe_merkeze = math.hypot(x - 25.0, y - 20.0)
+    r1_yaricap = math.hypot(1.0, 1.0) / 2.0
+    assert mesafe_merkeze >= 8.0 + r1_yaricap - 1e-6, (
+        "R1 keepout dairesinin İÇİNE girdi - SONSUZ itme uygulanmadı"
+    )
+
+    # Keepout'suz halde R1 gerçekten koridora girmiş olmalı (aksi halde bu
+    # test hiçbir şey ölçmüyor demektir - fault-injection disiplini).
+    xk, yk = sonuc_keepoutsuz.koordinatlar["R1"]
+    assert math.hypot(xk - 25.0, yk - 20.0) < 8.0 + r1_yaricap

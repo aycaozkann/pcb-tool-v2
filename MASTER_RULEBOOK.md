@@ -19,6 +19,74 @@
   > biri bile FAIL ise kanonik dosyaya HİÇBİR ŞEY yazılmaz ("PROMOTION
   > RED"). Bkz. `scratch_yonetimi.py`/`bagimsiz_dogrulama.py`/
   > `karar_birimleri.py` ve `main.py::cmd_promote`.
+* **Sert Arama Sınırı (Otomatik Router'lar İçin, İstisnasız):** Paylaşılan/büyüyen bir engel haritası üzerinde çalışan HER otomatik router araması (A* veya benzeri), net/hedef başına üç bağımsız sert sınıra tabidir: (1) düğüm-genişletme sınırı, (2) duvar-saati (wall-clock) sınırı, (3) başlangıç/hedefi kapsayan +marj'lı bir bounding box — arama bu kutunun dışına ASLA çıkamaz. Sınırlardan biri tetiklenince net "UNROUTED" işaretlenip HEMEN bir sonraki net'e geçilir; sınırsız/"pratikte hiç tetiklenmeyecek kadar yüksek" bir sınır koymak YASAKTIR. Sınır DEĞERİ kafadan seçilmez — gerçek patholojik bir senaryoyla (örn. hedefin sadece katman-değişimiyle ulaşılabildiği bir "ada" topolojisi) ölçülüp, o senaryoda GERÇEKTEN hızlı kaldığı kanıtlanmış bir değer kullanılır. *(Gerekçe: cm4_io_test projesinde `bulk_lowspeed_router.py`/`independent_net_router.py`, "15.000 düğüm veya 5 saniye" gibi makul görünen bir sınırla bile gerçek bir board üzerinde 300+ saniye tek bir net'te kilitlendi — kök neden, heap'te neredeyse-yinelenen düşük-maliyetli girdilerin birikip 2000-5000 genişletme arasında performansın sert şekilde çökmesiydi; duvar-saati kontrolü TEK BAŞINA bunu güvenilir şekilde yakalayamadı. Sınır ampirik olarak 2000 düğüm/3 saniyeye düşürülüp aynı patolojik senaryoda gerçekten hızlı kaldığı ölçülerek doğrulandıktan sonra bu madde eklendi — bkz. `bounded_astar.py` ve `DOCS/10_Otonomluk_Engel_Raporu.md` D1.7.)*
+* **pcbnew Bağımlılığı Her Zaman Lazy + Fail-Closed KAPSAM_YOK (İstisnasız):** `pcbnew`'e bağımlı HER modül, `import pcbnew` satırını dosyanın/modülün EN ÜSTÜNE koyamaz — import, pcbnew'i GERÇEKTEN kullanan fonksiyonun/CLI giriş noktasının İÇİNDE (lazy) yapılır. `ImportError`/`ModuleNotFoundError` çıkarsa ham exception çağırana SIZDIRILMAZ; bunun yerine ilgili kontrol `bulgu_sozlesmesi.Bulgu` kullanıyorsa `taranan=0` → otomatik `KAPSAM_YOK`, kullanmıyorsa (bağımsız CLI script'i gibi) kendi "NO_COVERAGE" sözleşmesiyle raporlanır — sessiz crash YASAK, sessiz PASS de YASAK. *(Gerekçe: `via_stub.py`'de modül seviyeli `import pcbnew`, dosyanın pcbnew'siz HER ortamda (bu projenin kendi geliştirme venv'i dahil) hiç import EDİLEMEMESİNE, dolayısıyla hiç test YAZILAMAMASINA yol açmıştı — 2026-08-03'te lazy import'a çevrilip `pcbnew_koprusu.py`'nin zaten kullandığı `_pcbnew_veya_kapsam_yok()` deseniyle hizalandı; bkz. `DOCS/10_Otonomluk_Engel_Raporu.md` D1.4, `test_via_stub.py`.)*
+* **Akış Öncelikli Yerleşim ve Hiyerarşik Routing:** Otomatik yol bulma ve yerleşim süreçleri rastgele sırada çalıştırılamaz; önce güç ağacı ve dekuplajlar, ardından kritik yüksek hızlı hatlar ve en son düşük hızlı I/O'lar işlenmek zorundadır. *(Gerekçe: kör routing süreçlerinde yaşanan yoğunluk duvarı, kilitlenme ve kısa devre patolojilerinin önlenmesi.)*
+  > **Kod karşılığı (2026-08-03):** `kuvvet_yonelimli_yerlesim.py::hiyerarsik_yerlesim_coz()`
+  > bu sırayı ZORUNLU kılar (`YerlesimKategorisi.GUC_DEKUPLAJ` ->
+  > `KRITIK_HS` -> `DUSUK_HIZ_IO`); her aşama bir öncekini `sabit=True`
+  > kilitler. `main.py`'nin Faz 4'ü (`faz_yerlesim_planlama`) bunu çağırır
+  > ve Faz 4b'nin (termal keepout) bulgusunu `termal_kisitlarini_uret()`
+  > ile GERÇEK bir yerleşim GİRDİSİNE (`MesafeKisiti`) çevirir — ayrı,
+  > ondan habersiz bir sonraki adım olarak değil. Bu faz `.kicad_pcb`'ye
+  > YAZMAZ (TOHUM/planlama motoru, `TEST/yerlesim_raporu.md`'ye yazar) —
+  > gerçek `pcbnew` yazımı hâlâ ayrı, insan onaylı bir adımdır.
+* **Yüksek Hızlı/Diferansiyel Netler İçin Yerleşim Sırasında Routing Koridoru Ayrılmalıdır (İstisnasız):** Force-directed yerleşim motoru sadece courtyard ÇAKIŞMASINI çözer — bir diferansiyel çiftin/yüksek hızlı sinyalin iki ucu arasında GERÇEKTEN routing yapılabilecek kadar boş koridor bırakmayı bir hedef olarak BİLMEZ, çünkü ratsnest minimizasyonu doğası gereği bağlı komponentleri birbirine (ve dolayısıyla aynı iki sabit çapaya bağlı KOMŞU yüksek hızlı çiftleri de birbirine) yaklaştırır. Bu yüzden her yüksek hızlı/diferansiyel net (isim `_P`/`_N` ile bitiyorsa, net class'ı diferansiyel-empedans sınıfıysa, veya CSI/MIPI geçiyorsa) OTOMATİK olarak (a) daha ağır bir çekim ağırlığı alır VE (b) bağlantı hattı boyunca 3W kuralına göre bir keepout (dışlama) bölgesi üretir; bu bölgeye giren HERHANGİ bir üçüncü komponent hem yerleşim sırasında SONSUZ itmeyle (adımı reddedilerek) hem de yerleşim BİTTİKTEN sonra sert bir kabul kapısıyla reddedilir — kullanıcının bunu elle bir `MesafeKisiti` olarak tarif etmesi GEREKMEZ. *(Gerekçe: cm4-io-test projesinde D4-D7 (GbE MDI ESD kümesi) tanı testi somut olarak ölçtü — force-directed motor D4-D7'yi J1/J6'ya olan ortak ratsnest çekimiyle courtyard çakışması çözülene kadar yaklaştırdı ama ARADA routing için gereken koridoru hiç açmadı; bu netler sonradan gerçek PCB'de "no 2-segment escape topology... provable line-segment crossing" olarak elle kanıtlanan bir geometrik imkansızlığa dönüştü — keepout, bu sınıftaki sorunu yerleşim AŞAMASINDA, routing'e hiç gelmeden yakalar.)*
+  > **Kod karşılığı (2026-08-05, HighSpeedRuleManager):**
+  > `kuvvet_yonelimli_yerlesim.py` Bölüm 6 — `yuksek_hizli_net_mi()`
+  > (otomatik tespit, `netlistten_graf_kur()`'a bağlı: elle `agirlik`
+  > verilmemiş HS netler otomatik `YUKSEK_HIZLI_VARSAYILAN_AGIRLIK=3.0`
+  > alır), `YuksekHizKeepout` + `yuksek_hiz_keepout_hesapla()` (3W kuralı,
+  > `pcb_stackup_planner.py::iz_genisligi_hesapla_mm()`'in FORMÜLÜYLE
+  > tutarlı, yeniden icat edilmedi), `keepout_cakismasi_kontrolu()` +
+  > `yuksek_hiz_keepout_kontrolu()` (yeni `Bulgu` ihlal tipi:
+  > `yuksek_hiz_keepout_ihlali`, `cakisma_kontrolu()`/`kisitlari_dogrula()`
+  > YERİNE değil YANINA). `yerlesim_coz()`'e `keepoutlar` parametresi
+  > eklendi: ihlal eden bir adım courtyard-courtyard ayırmasından AYRI,
+  > SONSUZ itmeyle (adım tamamen reddedilir) engellenir.
+  > `.scratch/cm4_d4d7_test/d4d7_corridor_test_v2_keepout.py` ile GERÇEK
+  > cm4-io-test D4-D7 verisine karşı doğrulandı: keepout ihlalleri
+  > `['D4','D7']` -> `[]`'e düştü, D4-D6 koridoru +5.59mm genişledi,
+  > courtyard çakışması hâlâ 0 (PASS) — board'a hiçbir şey YAZILMADI (bu
+  > motorun kendi sınırı zaten böyle).
+* **HDI Via Tipi Seçimi Pad Pitch'ine Göre Zorunludur:** BGA/fine-pitch bir komponentin pad pitch'i, kullanılabilecek via tipini ve o via'nın aspect-ratio (delme oranı) sınırını belirler — bu seçim routing başlamadan ÖNCE, proaktif olarak yapılmak zorundadır: **pitch ≥ 0.8mm** → standart BOYDAN_BOYA via (maliyet düşük, 8:1'e kadar aspect ratio güvenilir); **0.5mm ≤ pitch < 0.8mm ve geçiş yüzeysel (1-2 katman)** → KÖR (blind) via, **aspect ratio sınırı 1:1**; **pitch < 0.5mm veya komşu pad'e sığacak alan yoksa** → MİKROVIA + via-in-pad, aspect ratio sınırı yine **1:1**, ve via-in-pad seçildiği an **IPC-4761 Type VII (dolgu+kapak)** ZORUNLU sayılır. *(Gerekçe: üretim maliyeti — kör/gömülü/mikrovia standart boydan-boya viadan kat kat pahalıdır, sadece yoğunluk gerektirdiğinde kullanılmalı — VE fiziksel aspect-ratio sınırı — lazer/kör delik teknolojisi 1:1'i aştığında fabrika via'yı güvenilir metalize edemez, oysa mekanik boydan-boya delik 8:1'e kadar güvenlidir.)*
+  > **Kod karşılığı (2026-08-04):** `via_siniflandirma.py::select_via_type_for_bga()`
+  > bu eşik tablosunu ZORUNLU kılar ve via-in-pad seçilirse
+  > `dolgu_ve_kapak_var_mi=True` otomatik işaretler.
+  > `pcb_stackup_planner.py::via_tipi_aspect_ratio_kontrolu()` her via'yı
+  > KENDİ tipine göre (BOYDAN_BOYA≠KOR/GOMULU/MIKROVIA) değerlendirir —
+  > board-genel `ViaTipi` politika bayrağının (`fiziksel_dogrulama_yap`
+  > KONTROL 3) YERİNE değil, YANINA eklenmiştir. `pcbnew_koprusu.py::
+  > via_in_pad_kontrolu()` artık opsiyonel bir `via_siniflandirma_haritasi`
+  > alır: bilinçli, dolgu+kapaklı via-in-pad'ler ARTIK ihlal SAYILMAZ;
+  > sınıflandırma bilgisi eksik/`False` olan via-in-pad'ler ise (eskisi
+  > gibi) gerçek bir DRC hatasıdır — sadece "fab notunda belirtilmeli"
+  > tavsiyesi değil.
+* **Dekuplaj Kapasitörü Sayı-Doğru Olması YETMEZ, FİZİKSEL OLARAK YAKIN Olmalıdır:** Şematikte her güç pini için bir decoupling kapasitörü TANIMLANMIŞ olması (sayı kontrolü) yeterli DEĞİLDİR — o kapasitörün gerçek board yerleşiminde IC'nin ilgili güç pinine yeterince YAKIN (varsayılan üst sınır 3mm) yerleştirilmiş olması AYRICA doğrulanmalıdır. *(Gerekçe: mesafe aşılırsa parazit ve ani-akım-kaynaklı resetlenme riski artar — sayı kontrolü doğru olsa bile bir kapasitör IC'den 20mm uzakta yerleştirilmiş olabilir, bu durumu sadece fiziksel-koordinat kontrolü yakalayabilir.)*
+  > **Kod karşılığı (2026-08-04):** `pcbnew_koprusu.py::dekuplaj_mesafe_kontrolu()`
+  > gerçek board koordinatlarından her IC güç pini için en yakın uygun
+  > (47-220nF) kapasitörün mesafesini ölçer — `pcb_stackup_planner.py::
+  > dekuplaj_kontrolu()`'nun (şematik-seviyesi, SAYI bazlı) YERİNE değil,
+  > YANINA eklenmiştir; ikisi FARKLI katmanları (şematik-niyet vs
+  > fiziksel-gerçeklik) doğrular, ikisi de gereklidir. "Kapasitör yok" ile
+  > "kapasitör var ama uzak" AYRI ihlal türleri olarak raporlanır.
+* **PMIC Çıkışları BOM Seviyesinde Yeterli Görünmesi YETMEZ, Proje Raylarına GERÇEKTEN Tahsis Edilmelidir:** Bir PMIC'in datasheet'inde "yeterli sayıda çıkışı var" görünmesi, o çıkışların BU PROJENİN gerçek ray ihtiyaçlarını (gerilim + akım) karşıladığı anlamına GELMEZ — her ray, gerilimi uyan VE yeterli kalan akım kapasitesine sahip bir çıkışa AÇIKÇA tahsis edilmeli; tahsis edilemeyen bir ray ek (supplementary) regülatör gerektirir ve bu regülatörün TERMAL bütçeye etkisi baştan raporlanmalıdır. *(Gerekçe: "kaç çıkışı var" sorusu ile "bu çıkışlar HANGİ raya GİDİYOR" sorusu farklıdır — ikincisi atlanırsa bir ray sessizce tahsissiz kalıp tasarımın geç bir aşamasında (routing/BOM kilitlenmesinden sonra) fark edilir.)*
+  > **Kod karşılığı (2026-08-04):** `pmic_ray_tahsisi.py::ray_tahsisi_kontrol_et()`
+  > greedy eşleştirme ile her `RayIhtiyaci`yı bir `PMICCikisi`na atar;
+  > tahsis edilemeyen raylar `ray_tahsis_edilemedi`, aşırı yüklenen
+  > çıkışlar `cikis_asiri_yuklendi` olarak AYRI ihlal türleri döner.
+  > `pcb_stackup_planner.py::MekanikVeTermalKisitlar.maks_isi_yayilimi_W`
+  > ile entegre: ek regülatör gerekiyorsa TAHMİNİ ısı katkısı hesaplanıp
+  > mevcut termal bütçeyle karşılaştırılır.
+* **Kritik Pin Kategorileri (Boot-Strap/Mode-Select/Reserved-NDA) Datasheet Teyidi OLMADAN Promotion'dan GEÇEMEZ:** Bir komponentin net isimlerinde "BOOT", "SYSBOOT", "MODE_SEL", "NC_RESERVED" gibi bilinen bir kritik-pin deseni tespit edilirse, bu OTOMATİK olarak `durum: ACIK` bir karar birimi açar — üreticinin GÜNCEL datasheet/errata belgesinden pin seviyesi/direnç değeri teyit EDİLİP karar `KABUL_EDILDI`ye çekilmeden `main.py promote` bu kapıdan GEÇEMEZ. *(Gerekçe: strap/mode-select pinleri YANLIŞ seviyede bırakılırsa komponent boot etmez veya yanlış modda çalışır — bu sınıf hatalar genelde ilk enerjilemede fark edilir, o noktada board zaten üretilmiştir.)*
+  > **Kod karşılığı (2026-08-04):** `karar_birimleri.py::
+  > kritik_pin_teyit_karari_olustur()` + `kritik_pin_karalarini_tespit_ve_kaydet()`
+  > — bu fonksiyon datasheet'i OKUMAZ, sadece "teyit edildiğine dair bir
+  > kayıt yoksa promotion durur" diyen bir KAPI kurar; teyidi (Claude
+  > Code'un datasheet'i okuyup) bir sonraki oturum sağlar ve kararı
+  > `KABUL_EDILDI`ye çeker. Mevcut `kabul_edilmemis_kararlari_bul()` bu
+  > yeni kararları OTOMATİK yakalar — ek promosyon-kapısı kodu GEREKMEZ.
+* **Kalıcı Kapsam Dışı Kategoriler (İstisnasız):** Şu üç kategori pcb-tool-v2'nin KALICI kapsamı dışındadır, otomatikleştirilmeye ÇALIŞILMAZ: (1) FPGA/ASIC vendor P&R araçları (Lattice Radiant, Vivado vb.) ile pin-planı/timing-closure doğrulaması — bu ayrı bir toolchain'dir; (2) firmware/yazılım PoC doğrulaması — donanımın çizilmesi yazılımın çalışacağı anlamına gelmez, bu ayrı bir disiplindir; (3) tam 3D/full-wave SI field solver'ın (`empedans_cozucu.py` kapalı-form formülünün) YERİNE GEÇMESİ — üretim sign-off'u için gerçek laminate verisi + field solver + TDR raporu her zaman gereklidir. *(Gerekçe: bu sınırların açıkça yazılmaması, gelecekte bir oturumun bunları "eksik" sanıp gereksiz/yanlış bir kapsam genişlemesine girişmesine yol açabilir.)*
 
 ---
 
@@ -217,6 +285,9 @@ karşılığı: `ecad_mcad_termal_kopru.py`.**
 * **Akım Taşıyan Via Delik Çapı:** Güç/dikiş (stitching) via'larının delik çapı, sadece fabrikanın minimum delik çapı (`FabrikaProfili.min_delik_capi_mm`) varsayılarak SEÇİLMEMELİDİR — via'nın gerçekte taşıyacağı akım IPC-2221 kesit-alanı formülüyle (aynı `pcb_stackup_planner.iz_genisligi_hesapla_mm` sabitleri, via'nın silindirik kaplama geometrisine uyarlanmış hali) doğrulanmalıdır. **Kod karşılığı:** `via_capi_hesaplayici.py::via_capi_oner()` (CLI: `python main.py via-capi --akim A --fabrika PROFIL_ADI`) hesaplanan delik çapını üretilebilirlik tabanıyla karşılaştırır, gerekirse tabana yükseltir ve `pad_capi_hesapla_mm()` ile yıllık halka payını ekler. *(Not: bu modülün "via stitching" — birden fazla via'ya bölme — dalı, sabit kaplama kalınlığında Alan'ın çapla DOĞRUSAL (D² değil) büyümesi nedeniyle matematiksel olarak her zaman `gerekli_via_sayisi=1` üretir; gerçek çok-via stitching için modülün docstring'indeki "MATEMATİKSEL NOT"a bakın — bu KAPSAM DIŞI bırakılmış bilinen bir sınırdır, sessizce gizlenmemiştir.)*
 * **Via Stub (Kör Uç) Minimizasyonu:** 1 GHz ve üzeri yüksek hızlı hatlar (MIPI, Gigabit Ethernet vb.) iç katmanlara yönlendirilirken Via Stub (kullanılmayan via uzantısı) etkisi hesaba katılmalıdır. Tasarımcı, empedans yansımasını önlemek için ya sinyali tüm katmanları geçecek şekilde (Örn: Top'tan Bottom'a) yönlendirmeli ya da üreticiye (Fab) "Backdrilling" (Fazlalık via kısmını matkapla temizleme) kuralı tanımlamalıdır.
 * **Yüksek Voltaj İzolasyonu (Creepage & Clearance):** 50V ve üzeri gerilim taşıyan hatlar (Şebeke/Röle/Motor hatları) ile düşük voltajlı dijital devrelere ait netler arasında IPC-2221 standartlarına uygun Yüzey Atlama (Creepage) mesafesi bırakılmalıdır (Örn: 220V için min. 2.5mm). Eğer fiziksel yer darlığından bu mesafe sağlanamıyorsa, iki bölge arasına PCB kesim (Edge.Cuts/Milling) katmanında fiziksel "İzolasyon Yarığı (Isolation Slot)" açılması zorunludur.
+* **FreeRouting/DSN Diferansiyel Çift Sınırı (İstisnasız):** KiCad'in `pcbnew.ExportSpecctraDSN()` aracı diferansiyel çift (diff-pair) eşleştirme/coupling bilgisini DSN formatına AKTARMAZ — tüm netler (P/N ayrımı gözetilmeksizin) tek düz bir `(class ...)` bloğunda düzleştirilir. Bu nedenle yüksek hızlı diferansiyel çiftler (ör. J1 Gigabit Ethernet TRD0-3, MIPI CSI/DSI, HDMI TMDS) ASLA FreeRouting'e gönderilmez — FreeRouting yakınsasa bile eşit-uzunluk/paralel-eşleşme garantisi vermez, bağımsız tek-uçlu net gibi routeler. FreeRouting SADECE tek-uçlu (single-ended) ve düşük hızlı netler için kullanılır; diferansiyel çiftler `pcbnew_diff_pair_router.py` (veya elle/GUI) ile ayrıca, FreeRouting'den ÖNCE ve board üzerinde KİLİTLİ (`LOCKED`) olarak çözülür. *(Gerekçe: cm4_io_test projesinde bu sınır 2026-08-03'te gerçek bir `.dsn` export'u incelenerek DOĞRULANDI — `grep -c "(class "` → 1, HDMI/DSI/CAM diferansiyel çiftleri dahil hepsi aynı düz sınıfta. Bkz. `DOCS/10_Otonomluk_Engel_Raporu.md` D1.5/D1.1, `karar_birimleri.json: j1-pair-twist-cozumu`.)*
+* **Çok-Pedli (3+) Net Segmentasyonu (İstisnasız):** 3 veya daha fazla pede sahip dallanan bir net, standart A* (2-nokta) algoritmasıyla TEK seferde routelanamaz — router'a doğrudan verilmeden ÖNCE bir Minimum Spanning Tree (MST/Steiner ağacı yaklaşımı) ile ikili (2 pedli) segmentlere bölünmelidir. **Kod karşılığı:** `steiner_agaci_motoru.py` — `networkx` ile öklid mesafe ağırlıklı MST kurar, çıktısı A*/bulk router'ın doğrudan tüketebileceği "A noktasından B noktasına" segment listesidir. *(Gerekçe: cm4_io_test'teki `bulk_lowspeed_router.py` sadece 2-pedli basit netleri kapsıyordu — 259 net'in geri kalan ~156'sı (3+ pedli/dallanan) hiç ele alınamadı; bu kural bir sonraki oturumun bu boşluğu doğrudan segmentasyonla kapatmasını sağlar.)*
+* **JLCPCB DFM API Yerine Yerel Otorite (İstisnasız):** Dışa bağımlı bir üçüncü-parti DFM API'si (ör. JLCPCB), ağ/kimlik doğrulama/şema belirsizliğinden dolayı fail-closed bir bağımlılık yaratır ve sessizce "üretime hazır" yanılgısına yol açabilir. Bu nedenle TEK DFM doğrulama otoritesi yerel `pcbnew` DRC'si (`kicad_koprusu.py::drc_calistir`) ve `ipc6012_dfm_motoru.py`'dir — dış API'ler (varsa) SADECE ek/opsiyonel bir bilgi katmanı olarak kalır, hiçbir promosyon/release kapısı bunlara BAĞIMLI kılınmaz. *(Gerekçe: `uretim_zinciri_koprusu.py::jlcpcb_dfm_kontrolu_gonder()` 2026-08-03'te gerçek fail-closed ağ koduna kavuştu ama gerçek JLCPCB endpoint'i/şeması hiçbir zaman doğrulanamadı — bkz. `DOCS/10_Otonomluk_Engel_Raporu.md` D1.2 "KISMİ ÇÖZÜLDÜ".)*
 
 ---
 

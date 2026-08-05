@@ -42,9 +42,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from bulgu_sozlesmesi import Bulgu, bulgu_uret
+from ecad_mcad_termal_kopru import KomponentTermalDurumu, TermalTemasBolgesi, soguturucu_yuzey_bul
 
 # Güç/toprak netleri force-directed grafiğine DAHİL EDİLMEZ (ağırlık 0):
 # MASTER_RULEBOOK Faz 7'ye göre GND bir DÜZLEM olarak dökülür, nokta-nokta
@@ -121,6 +123,24 @@ class MesafeKisiti:
     aciklama: str = ""
 
 
+class YerlesimKategorisi(str, Enum):
+    """`main.py` Faz 4 orkestrasyonunun ZORUNLU kıldığı 3 aşamalı hiyerarşi
+    (2026-08-03, MASTER_RULEBOOK "Akış Öncelikli Yerleşim ve Hiyerarşik
+    Routing" kuralı): önce güç/dekuplaj, sonra kritik HS/diferansiyel,
+    en son düşük hızlı I/O."""
+
+    GUC_DEKUPLAJ = "guc_dekuplaj"
+    KRITIK_HS = "kritik_hs"
+    DUSUK_HIZ_IO = "dusuk_hiz_io"
+
+
+_HIYERARSI_SIRASI: Tuple[YerlesimKategorisi, ...] = (
+    YerlesimKategorisi.GUC_DEKUPLAJ,
+    YerlesimKategorisi.KRITIK_HS,
+    YerlesimKategorisi.DUSUK_HIZ_IO,
+)
+
+
 @dataclass
 class YerlesimSonucu:
     koordinatlar: Dict[str, Tuple[float, float]]
@@ -171,7 +191,15 @@ def netlistten_graf_kur(
         benzersiz = sorted(set(net.baglantilar))
         if len(benzersiz) < 2:
             continue  # tek pinli/bağlantısız net çekim üretmez
-        pay = net.agirlik / (len(benzersiz) - 1)
+        # HighSpeedRuleManager (bkz. Bölüm 6): net.agirlik ELLE verilmemişse
+        # (varsayılan 1.0'da kaldıysa) VE net yüksek-hızlı/diferansiyel
+        # tespit edilirse ağırlık otomatik yükseltilir - kullanıcı ayrıca
+        # `Net(agirlik=...)` YAZMAK ZORUNDA kalmaz. Elle 1.0 dışında bir
+        # değer verilmişse (örn. bilinçli olarak 0.5) o değere dokunulmaz.
+        etkin_agirlik = net.agirlik
+        if etkin_agirlik == 1.0 and yuksek_hizli_net_mi(net.isim):
+            etkin_agirlik = YUKSEK_HIZLI_VARSAYILAN_AGIRLIK
+        pay = etkin_agirlik / (len(benzersiz) - 1)
         for i in range(len(benzersiz)):
             for j in range(i + 1, len(benzersiz)):
                 anahtar = (benzersiz[i], benzersiz[j])
@@ -374,6 +402,7 @@ def yerlesim_coz(
     itme_katsayisi: float = 1.0,
     yakinsama_esigi_mm: float = 0.01,
     baslangic_adimi_mm: float = 2.0,
+    keepoutlar: Sequence["YuksekHizKeepout"] = (),
 ) -> YerlesimSonucu:
     """Force-directed yerleşim: bağlı komponentleri ÇEKER, çakışanları İTER.
 
@@ -391,6 +420,15 @@ def yerlesim_coz(
       - **Kısıt kuvveti:** `MesafeKisiti` ihlal ediliyorsa ihlal miktarıyla
         orantılı ek bir çekme/itme uygulanır (yumuşak kısıt — sert kabul
         `kisitlari_dogrula()`'da ölçülür).
+      - **Keepout (HighSpeedRuleManager, Bölüm 6):** `keepoutlar` verilmişse,
+        courtyard-courtyard itmesinden AYRI bir SONSUZ itme davranışı
+        uygulanır — bir komponentin normal kuvvet adımı onu bir keepout
+        dairesinin içine sokacaksa, o adım o komponent için TAMAMEN
+        REDDEDİLİR (eski konumunda kalır), yumuşak bir kuvvetle
+        "yaklaşabilir ama biraz" DEĞİL. Gerekçe: yumuşak bir kuvvet, güçlü
+        bir çekim (örn. yüksek ağırlıklı bir HS net) tarafından ezilebilir
+        — tam olarak `_cakismalari_ayir()`'ın courtyard çakışması için
+        zaten çözdüğü sorunun keepout karşılığı.
 
     Soğutma (cooling): adım boyu iterasyonla lineer azalır — salınım
     (oscillation) yerine yakınsama sağlar. `sabit=True` komponentler hiç
@@ -491,6 +529,11 @@ def yerlesim_coz(
             # Komponentin courtyard'ı kart dışına taşmasın (Aşama 3.1).
             yeni_x = min(max(yeni_x, k.genislik_mm / 2.0), kart_genisligi_mm - k.genislik_mm / 2.0)
             yeni_y = min(max(yeni_y, k.yukseklik_mm / 2.0), kart_yuksekligi_mm - k.yukseklik_mm / 2.0)
+            if keepoutlar and _keepout_ihlali_mi(ref, yeni_x, yeni_y, k, keepoutlar):
+                # SONSUZ itme: yumuşak kuvvet yerine adımın TAMAMI reddedilir,
+                # komponent bu iterasyonda eski konumunda kalır (bkz. yukarı
+                # docstring notu ve HighSpeedRuleManager, Bölüm 6).
+                continue
             son_hareket = max(son_hareket, math.hypot(yeni_x - x, yeni_y - y))
             koordinatlar[ref] = (yeni_x, yeni_y)
 
@@ -507,6 +550,301 @@ def yerlesim_coz(
         son_hareket_mm=round(son_hareket, 6),
         baslangic_ratsnest_mm=round(baslangic_ratsnest, 4),
         son_ratsnest_mm=round(ratsnest_uzunlugu_toplami(koordinatlar, kenarlar), 4),
+    )
+
+
+# ------------------------------------------------------------------
+# 3b. HİYERARŞİK (AŞAMALI) YERLEŞİM — main.py Faz 4 orkestrasyonu
+# ------------------------------------------------------------------
+
+def hiyerarsik_yerlesim_coz(
+    komponentler: Sequence[Komponent],
+    kategoriler: Dict[str, YerlesimKategorisi],
+    netler: Sequence[Net],
+    kart_genisligi_mm: float,
+    kart_yuksekligi_mm: float,
+    kisitlar: Sequence[MesafeKisiti] = (),
+    **kwargs,
+) -> YerlesimSonucu:
+    """`yerlesim_coz()`'ü ZORUNLU 3 aşamalı hiyerarşiyle (güç/dekuplaj ->
+    kritik HS/diferansiyel -> düşük hızlı I/O) çalıştırır.
+
+    Her aşama bir ÖNCEKİ aşamada yerleşmiş komponentleri `sabit=True`
+    KİLİTLER (o komponentler artık hareket etmez ama yeni aşamanın
+    komponentlerine kuvvet uygulamaya devam eder) — yerleşim rastgele
+    sırada değil, MASTER_RULEBOOK'un "Akış Öncelikli Yerleşim ve Hiyerarşik
+    Routing" kuralına göre yapılır (Gerekçe: kör/sırasız yerleşim/routing
+    süreçlerinde yoğunluk duvarı, kilitlenme ve kısa devre patolojileri
+    yaşanır — bkz. bu oturumun `bulk_lowspeed_router.py` deneyimi).
+
+    `kategoriler` içinde ADI OLMAYAN komponentler (örn. sabit konnektörler)
+    HER aşamada zaten-sabit kabul edilir; `k.sabit=True` olanlar zaten
+    hiçbir aşamada hareket etmez (motorun kendi kuralı, burada bozulmaz).
+    """
+    kilitli: Dict[str, Tuple[float, float]] = {}
+    son_sonuc: Optional[YerlesimSonucu] = None
+    dahil_kategoriler: List[YerlesimKategorisi] = []
+
+    for kategori in _HIYERARSI_SIRASI:
+        dahil_kategoriler.append(kategori)
+        asama_komponentleri: List[Komponent] = []
+        for k in komponentler:
+            if k.sabit:
+                asama_komponentleri.append(k)
+            elif k.ref in kilitli:
+                x, y = kilitli[k.ref]
+                asama_komponentleri.append(
+                    Komponent(k.ref, k.genislik_mm, k.yukseklik_mm, x, y, sabit=True)
+                )
+            elif kategoriler.get(k.ref) in dahil_kategoriler:
+                asama_komponentleri.append(k)
+            # else: bu komponentin sırası henüz gelmedi -> bu aşamaya DAHİL EDİLMEZ
+
+        if not asama_komponentleri:
+            continue
+        sonuc = yerlesim_coz(
+            asama_komponentleri, netler, kart_genisligi_mm, kart_yuksekligi_mm, kisitlar, **kwargs
+        )
+        for ref, xy in sonuc.koordinatlar.items():
+            if kategoriler.get(ref) == kategori:
+                kilitli[ref] = xy
+        son_sonuc = sonuc
+
+    if son_sonuc is None:
+        return YerlesimSonucu({}, 0, False, 0.0, 0.0, 0.0)
+
+    tum_koordinatlar: Dict[str, Tuple[float, float]] = dict(kilitli)
+    for k in komponentler:
+        if k.ref not in tum_koordinatlar:
+            tum_koordinatlar[k.ref] = (k.x, k.y)  # sabit ama hiç aşamaya girmemiş olabilir
+
+    kenarlar = netlistten_graf_kur(netler)
+    return YerlesimSonucu(
+        koordinatlar={r: (round(x, 4), round(y, 4)) for r, (x, y) in tum_koordinatlar.items()},
+        iterasyon=son_sonuc.iterasyon,
+        yakinsadi_mi=son_sonuc.yakinsadi_mi,
+        son_hareket_mm=son_sonuc.son_hareket_mm,
+        baslangic_ratsnest_mm=son_sonuc.baslangic_ratsnest_mm,
+        son_ratsnest_mm=round(ratsnest_uzunlugu_toplami(tum_koordinatlar, kenarlar), 4),
+    )
+
+
+def termal_kisitlarini_uret(
+    termal_durumlar: Sequence[KomponentTermalDurumu],
+    yuzeyler: Sequence[TermalTemasBolgesi],
+    maks_mesafe_mm: float = 3.0,
+) -> Tuple[List[Komponent], List[MesafeKisiti]]:
+    """Faz 4b'nin (`ecad_mcad_termal_kopru.py`) termal keepout bulgusunu,
+    yerleşim motoruna GERÇEK bir GİRDİYE (`MesafeKisiti`) çevirir — ayrı,
+    ondan habersiz bir sonraki adım OLARAK DEĞİL.
+
+    Her komponent, kendi kasa termal temas yüzeyinin (`TermalTemasBolgesi`)
+    İÇİNDEYSE (`soguturucu_yuzey_bul` ile bulunur): o yüzeyin poligon
+    merkezinde SABİT (hareket etmeyen) sentetik bir "termal çapa" komponenti
+    üretilir ve gerçek komponentin ondan `maks_mesafe_mm`'den daha uzağa
+    gitmemesini zorlayan bir `MesafeKisiti(maks_mm=...)` eklenir — yerleşim
+    motoru artık ısı kaynağını kasa temasından uzaklaştırmaz.
+
+    Kasa temas verisi paylaşılmayan (`termal_durumlar`/`yuzeyler` boş)
+    komponentler için hiçbir kısıt/çapa üretilmez — sessizce "termal olarak
+    güvenli" varsayılmaz, sadece bu fonksiyonun ürettiği ek girdi YOK olur.
+    """
+    ekstra_komponentler: List[Komponent] = []
+    kisitlar: List[MesafeKisiti] = []
+    for durum in termal_durumlar:
+        yuzey = soguturucu_yuzey_bul(durum.x, durum.y, yuzeyler)
+        if yuzey is None:
+            continue
+        merkez_x = sum(p[0] for p in yuzey.poligon) / len(yuzey.poligon)
+        merkez_y = sum(p[1] for p in yuzey.poligon) / len(yuzey.poligon)
+        capa_ref = f"_TERMAL_CAPA_{durum.yonetim.isim}"
+        ekstra_komponentler.append(Komponent(capa_ref, 0.1, 0.1, merkez_x, merkez_y, sabit=True))
+        kisitlar.append(MesafeKisiti(
+            ref_a=durum.yonetim.isim, ref_b=capa_ref, maks_mm=maks_mesafe_mm,
+            aciklama=f"Faz 4b termal keepout: {durum.yonetim.isim} kasa temas "
+                     f"yüzeyi '{yuzey.isim}'den {maks_mesafe_mm}mm'den uzağa gitmemeli",
+        ))
+    return ekstra_komponentler, kisitlar
+
+
+# ------------------------------------------------------------------
+# 6. HIGHSPEEDRULEMANAGER — Yüksek Hızlı Sinyal / Diferansiyel Çift Koruması
+# ------------------------------------------------------------------
+#
+# NEDEN BU BÖLÜM VAR (`.scratch/cm4_d4d7_test/d4d7_corridor_test.py`,
+# 2026-08-04 bulgusu): cm4-io-test'in D4-D7 ESD kümesi üzerinde çalıştırılan
+# bir tanı testi, motorun ratsnest'i minimize ederken D4-D7'yi (hepsi aynı
+# iki sabit çapaya - J1 ve J6 - bağlı) courtyard çakışması ÇÖZÜLENE kadar
+# birbirine yaklaştırdığını ama sonrasında ARADA gerçek routing için
+# gereken koridoru AÇMADIĞINI ölçtü - motor "çakışma yok" hedefini bilir,
+# "bu ikisinin arasında bir diferansiyel çiftin via-pair'i geçecek kadar yer
+# olsun" hedefini BİLMEZ. Bu bölüm o eksik hedefi somut bir girdiye çevirir:
+# yüksek hızlı/diferansiyel netleri otomatik tanır (A), onların yol
+# güzergâhı etrafında 3W kuralına göre bir dışlama (keepout) bölgesi
+# hesaplar (B), ve bu bölgeye giren HERHANGİ bir komponenti hem yumuşak
+# yerleşim sırasında (yerlesim_coz'daki SONSUZ itme, yukarı bak) hem de
+# sert kabul kapısında (C) reddeder.
+
+YUKSEK_HIZLI_VARSAYILAN_AGIRLIK = 3.0  # Net.agirlik docstring'indeki ">1" ile tutarlı
+
+
+def yuksek_hizli_net_mi(net_ismi: str, net_class: str = "") -> bool:
+    """Net class'ı 'DIFF_90OHM' gibi bir diferansiyel-empedans sınıfıysa,
+    VEYA net ismi _P/_N ile bitiyorsa (diferansiyel çift kuyruğu) VEYA
+    isimde CSI/MIPI geçiyorsa True döner. False-positive'i azaltmak için
+    _P/_N kontrolü net ismi en az 2 karakter uzunlukta bir gövdeye
+    sahipse uygulanır (tek karakterli "P"/"N" gibi kazara eşleşmeleri
+    önle)."""
+    ad = net_ismi.strip().upper()
+    sinif = net_class.strip().upper()
+    if "DIFF" in sinif:
+        return True
+    if "CSI" in ad or "MIPI" in ad:
+        return True
+    if ad.endswith("_P") or ad.endswith("_N"):
+        govde = ad[:-2]
+        if len(govde) >= 2:
+            return True
+    return False
+
+
+@dataclass
+class YuksekHizKeepout:
+    """Bir yüksek hızlı net için hesaplanmış dışlama bölgesi.
+
+    `kaynak_ref`/`hedef_ref`: bu keepout'u üreten pin çiftinin kendisi -
+    spesifikasyonda İSTENMEYEN ama gerekli bir ek alan (varsayılanı boş
+    string, geriye dönük uyumlu): keepout'un KENDİ iki ucu (örn. D4 ve D6
+    net TRD0/TRD2'nin kendi bağlantı noktalarıysa) bu keepout'a göre
+    "ihlalci" SAYILMAMALI - bir net kendi başlangıç/bitiş komponentinin
+    kendi koridoruna göre reddedilmesi anlamsız olurdu (koridor tam da o
+    komponentin PİMİNDEN başlıyor). Bu iki alan olmadan `keepout_
+    cakismasi_kontrolu`/`_keepout_ihlali_mi` her keepout'u kendi
+    uçlarına karşı hemen (yanlışlıkla) ihlalli bulurdu.
+    """
+
+    net_ismi: str
+    merkez_x_mm: float
+    merkez_y_mm: float
+    yaricap_mm: float   # 3W kuralına göre: iz genişliği * 3 + pad/track marjı
+    kaynak_ref: str = ""
+    hedef_ref: str = ""
+
+
+_KEEPOUT_PAD_TRACK_MARJI_MM = 0.15  # 3W'nin üstüne eklenen sabit pad/track payı
+
+
+def yuksek_hiz_keepout_hesapla(
+    net: Net,
+    koordinatlar: Dict[str, Tuple[float, float]],
+    iz_genisligi_mm: float,
+) -> List["YuksekHizKeepout"]:
+    """Netin bağlı olduğu pin çiftleri arasında (henüz routed değilse
+    uçtan uca, routed ise gerçek track segmentleri boyunca) 3W kuralına
+    göre bir keepout listesi üretir.
+
+    Bu fonksiyon henüz yerleşim aşamasında (routing öncesi) çağrıldığı
+    için "routed ise gerçek segment" yolu burada YOKTUR - segment verisi
+    olmadığında iki pin arasındaki DOĞRU ÇİZGİNİN ORTA NOKTASI kullanılır
+    (uçtan uca hattın basitleştirilmiş temsili). Gerçek routed segment
+    verisi ileride mevcut olduğunda bu fonksiyonun segment-bazlı bir
+    varyantı (örn. `yuksek_hiz_keepout_hesapla_routed()`) eklenebilir -
+    bu, mevcut imzayı BOZMADAN yapılacak ayrı bir ek olur.
+
+    3W kuralının formülü YENİDEN İCAT EDİLMEDİ: `pcb_stackup_planner.py::
+    iz_genisligi_hesapla_mm()` akım -> genişlik türetir (ters yön); burada
+    genişlik zaten girdi olduğundan doğrudan `iz_genisligi_mm * 3` alınır,
+    üstüne `pcb_highspeed_escape.py`'nin escape/trim toleranslarıyla aynı
+    mertebede sabit bir pad/track marjı (0.15mm) eklenir.
+    """
+    if not yuksek_hizli_net_mi(net.isim):
+        return []
+    yaricap = iz_genisligi_mm * 3.0 + _KEEPOUT_PAD_TRACK_MARJI_MM
+    benzersiz = sorted(set(net.baglantilar))
+    keepoutlar: List[YuksekHizKeepout] = []
+    for i in range(len(benzersiz)):
+        for j in range(i + 1, len(benzersiz)):
+            a, b = benzersiz[i], benzersiz[j]
+            if a not in koordinatlar or b not in koordinatlar:
+                continue
+            ax, ay = koordinatlar[a]
+            bx, by = koordinatlar[b]
+            keepoutlar.append(YuksekHizKeepout(
+                net_ismi=net.isim,
+                merkez_x_mm=(ax + bx) / 2.0,
+                merkez_y_mm=(ay + by) / 2.0,
+                yaricap_mm=yaricap,
+                kaynak_ref=a,
+                hedef_ref=b,
+            ))
+    return keepoutlar
+
+
+def _keepout_ihlali_mi(
+    ref: str,
+    x: float,
+    y: float,
+    komponent: Komponent,
+    keepoutlar: Sequence["YuksekHizKeepout"],
+) -> bool:
+    """Tek bir (ref, x, y) konumunun HERHANGİ bir keepout'u ihlal edip
+    etmediğini test eder - `keepout_cakismasi_kontrolu()` (toplu, sert
+    kapı) ve `yerlesim_coz()`'ün SONSUZ itmesi (yumuşak yerleşim sırasında,
+    her iterasyon) AYNI mantığı kullansın diye ortak bir yardımcı olarak
+    çıkarıldı (DRY - iki yerde ayrı ayrı yanlış senkronize kalma riski
+    olmasın)."""
+    for keepout in keepoutlar:
+        if ref in (keepout.kaynak_ref, keepout.hedef_ref):
+            continue  # netin kendi uç noktası - bkz. YuksekHizKeepout docstring'i
+        mesafe = math.hypot(x - keepout.merkez_x_mm, y - keepout.merkez_y_mm)
+        if mesafe < komponent.yaricap_mm + keepout.yaricap_mm:
+            return True
+    return False
+
+
+def keepout_cakismasi_kontrolu(
+    koordinatlar: Dict[str, Tuple[float, float]],
+    komponentler: Dict[str, "Komponent"],
+    keepoutlar: List["YuksekHizKeepout"],
+) -> List[str]:
+    """Her komponentin courtyard dairesi (`Komponent.yaricap_mm`) ile her
+    keepout dairesi arasındaki mesafe, iki yarıçapın toplamından küçükse,
+    o komponent referansını ihlal listesine ekler.
+
+    Not: bu fonksiyon (spesifikasyonu gereği) eski `List[str]` sözleşmesini
+    kullanır - `bulgu_sozlesmesi.Bulgu`'ya SARILMASI
+    `yuksek_hiz_keepout_kontrolu()` (aşağıda) tarafından yapılır; bu ayrım
+    `cakisma_kontrolu()`/`kisitlari_dogrula()`'nın kendi Bulgu sözleşmesini
+    DEĞİŞTİRMEDEN yeni bir "yuksek_hiz_keepout_ihlali" ihlal tipini onların
+    YANINA (yerine değil) eklemeyi mümkün kılar.
+    """
+    ihlaller: List[str] = []
+    for ref, komponent in komponentler.items():
+        if ref not in koordinatlar:
+            continue
+        x, y = koordinatlar[ref]
+        if _keepout_ihlali_mi(ref, x, y, komponent, keepoutlar):
+            ihlaller.append(ref)
+    return ihlaller
+
+
+def yuksek_hiz_keepout_kontrolu(
+    koordinatlar: Dict[str, Tuple[float, float]],
+    komponentler: Dict[str, Komponent],
+    keepoutlar: Sequence["YuksekHizKeepout"],
+) -> Bulgu:
+    """`keepout_cakismasi_kontrolu()`'nu `bulgu_sozlesmesi.Bulgu`
+    sözleşmesine sarar - `cakisma_kontrolu()`/`kisitlari_dogrula()`'nın
+    YANINA çağrılacak, kendi başına SERT bir kabul kapısı (`main.py`'nin
+    Faz 4 gate sırasına, mevcut ikisini DEĞİŞTİRMEDEN eklenir).
+    """
+    ihlal_refleri = keepout_cakismasi_kontrolu(koordinatlar, komponentler, list(keepoutlar))
+    return bulgu_uret(
+        "yuksek_hiz_keepout_ihlali",
+        taranan=len(komponentler),
+        ihlaller=[{"ref": r} for r in ihlal_refleri],
+        detay=f"{len(keepoutlar)} yüksek hızlı keepout bölgesine karşı "
+              f"{len(komponentler)} komponent test edildi (3W kuralı)",
     )
 
 
