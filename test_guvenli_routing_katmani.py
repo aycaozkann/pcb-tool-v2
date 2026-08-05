@@ -25,6 +25,7 @@ from guvenli_routing_katmani import (
     netclass_genislik_dogrula_board,
     netclass_genislik_dogrula_bulgu,
 )
+from hata_hafizasi import HataHafizasi, HataKaydi, KontrolTipi, Sonuc
 
 
 # ------------------------------------------------------------------
@@ -301,3 +302,154 @@ class TestGuvenliYazVeDogrula:
 
         assert bulgu.durum == BulguDurumu.PASS
         assert "yapilamadi" in bulgu.detay
+
+
+# ------------------------------------------------------------------
+# 4. FAZ 0 madde 5: hata_hafizasi entegrasyonu
+# ------------------------------------------------------------------
+
+
+class TestGuvenliYazVeDogrulaHataHafizasi:
+    def test_hafiza_verilmezse_davranis_eskisiyle_ayni(self, tmp_path, monkeypatch):
+        """Geriye dönük uyumluluk: hata_hafizasi=None (varsayılan) iken
+        detayda HAFIZA UYARISI görünmez, kayıt YAZILMAZ."""
+        board_path = tmp_path / "board.kicad_pcb"
+        board_path.write_text("ORIJINAL", encoding="utf-8")
+        settings = SahteDesignSettings(200_000, {})
+        _pcbnew_yukle(SahteBoard(settings))
+
+        rapor_onceki = {"violations": [{}] * 5, "unconnected_items": [{}] * 2}
+        rapor_yeni = {"violations": [{}] * 3, "unconnected_items": [{}] * 1}
+        import guvenli_routing_katmani as grk
+        monkeypatch.setattr(grk.subprocess, "run", _sahte_subprocess_run_uret([rapor_onceki, rapor_yeni]))
+
+        bulgu = guvenli_yaz_ve_dogrula(str(board_path), lambda b: None, zone_refill_yap=False)
+
+        assert bulgu.durum == BulguDurumu.PASS
+        assert "HAFIZA" not in bulgu.detay
+
+    def test_gecmis_basarisiz_strateji_hafiza_uyarisi_uretir(self, tmp_path, monkeypatch):
+        """Aynı `degisiklik_aciklamasi` daha önce BASARISIZ kaydedilmişse,
+        bu strateji tekrar denenirken bir HAFIZA UYARISI eklenir — deneme
+        yine de yapılır (fonksiyon kendiliğinden engel olmaz), sadece
+        çağırana bilgi taşınır."""
+        board_path = tmp_path / "board.kicad_pcb"
+        board_path.write_text("ORIJINAL", encoding="utf-8")
+        settings = SahteDesignSettings(200_000, {})
+        _pcbnew_yukle(SahteBoard(settings))
+
+        hafiza = HataHafizasi(dosya_yolu=str(tmp_path / "hafiza.md"))
+        hafiza.kaydet(HataKaydi(
+            tip=KontrolTipi.DRC,
+            mesaj="MIPI_CAM0 P/N coupled route, In2.Cu via gecisi",
+            kok_neden="via annular ring yetersiz",
+            cozum="Bu strateji DRC regresyonuna yol acti, geri alindi.",
+            sonuc=Sonuc.BASARISIZ,
+            proje="cm4-io-test",
+        ))
+
+        rapor_onceki = {"violations": [{}] * 5, "unconnected_items": [{}] * 2}
+        rapor_yeni = {"violations": [{}] * 3, "unconnected_items": [{}] * 1}
+        import guvenli_routing_katmani as grk
+        monkeypatch.setattr(grk.subprocess, "run", _sahte_subprocess_run_uret([rapor_onceki, rapor_yeni]))
+
+        bulgu = guvenli_yaz_ve_dogrula(
+            str(board_path), lambda b: None, zone_refill_yap=False,
+            hata_hafizasi=hafiza,
+            degisiklik_aciklamasi="MIPI_CAM0 P/N coupled route, In2.Cu via gecisi",
+        )
+
+        assert bulgu.durum == BulguDurumu.PASS  # deneme yine de yapıldı
+        assert "HAFIZA UYARISI" in bulgu.detay
+        assert "cm4-io-test" in bulgu.detay
+
+    def test_basarisiz_deneme_otomatik_hafizaya_yazilir(self, tmp_path, monkeypatch):
+        board_path = tmp_path / "board.kicad_pcb"
+        board_path.write_text("ORIJINAL", encoding="utf-8")
+        settings = SahteDesignSettings(200_000, {})
+        _pcbnew_yukle(SahteBoard(settings))
+
+        hafiza = HataHafizasi(dosya_yolu=str(tmp_path / "hafiza.md"))
+
+        rapor_onceki = {"violations": [{}] * 2, "unconnected_items": [{}] * 0}
+        rapor_yeni = {"violations": [{}] * 5, "unconnected_items": [{}] * 0}  # KÖTÜLEŞTİ
+        import guvenli_routing_katmani as grk
+        monkeypatch.setattr(grk.subprocess, "run", _sahte_subprocess_run_uret([rapor_onceki, rapor_yeni]))
+
+        bulgu = guvenli_yaz_ve_dogrula(
+            str(board_path), lambda b: None, zone_refill_yap=False,
+            hata_hafizasi=hafiza, degisiklik_aciklamasi="HDMI0 J2->ESD hop, via/katman A*",
+            proje="cm4-io-test",
+        )
+
+        assert bulgu.durum == BulguDurumu.FAIL
+        kayitlar = hafiza.kayitlari_oku()
+        assert len(kayitlar) == 1
+        assert kayitlar[0].sonuc == Sonuc.BASARISIZ
+        assert kayitlar[0].proje == "cm4-io-test"
+
+    def test_basarili_deneme_otomatik_hafizaya_cozuldu_diye_yazilir(self, tmp_path, monkeypatch):
+        board_path = tmp_path / "board.kicad_pcb"
+        board_path.write_text("ORIJINAL", encoding="utf-8")
+        settings = SahteDesignSettings(200_000, {})
+        _pcbnew_yukle(SahteBoard(settings))
+
+        hafiza = HataHafizasi(dosya_yolu=str(tmp_path / "hafiza.md"))
+
+        rapor_onceki = {"violations": [{}] * 5, "unconnected_items": [{}] * 2}
+        rapor_yeni = {"violations": [{}] * 3, "unconnected_items": [{}] * 1}
+        import guvenli_routing_katmani as grk
+        monkeypatch.setattr(grk.subprocess, "run", _sahte_subprocess_run_uret([rapor_onceki, rapor_yeni]))
+
+        bulgu = guvenli_yaz_ve_dogrula(
+            str(board_path), lambda b: None, zone_refill_yap=False,
+            hata_hafizasi=hafiza, degisiklik_aciklamasi="MIPI CAM1 coupled route",
+        )
+
+        assert bulgu.durum == BulguDurumu.PASS
+        kayitlar = hafiza.kayitlari_oku()
+        assert len(kayitlar) == 1
+        assert kayitlar[0].sonuc == Sonuc.COZULDU
+
+    def test_denemeler_arasi_ogrenme_uctan_uca(self, tmp_path, monkeypatch):
+        """Bir board'da BAŞARISIZ olan bir strateji, AYNI hafıza dosyası
+        kullanılarak farklı bir board'da (proje) tekrar denendiğinde
+        HAFIZA UYARISI olarak geri gelir — 'dersin projeler arası
+        taşınması' gereksinimini uçtan uca kanıtlar."""
+        hafiza_yolu = str(tmp_path / "paylasilan_hafiza.md")
+
+        # 1) İlk board: strateji dener, BAŞARISIZ olur.
+        board1 = tmp_path / "board1.kicad_pcb"
+        board1.write_text("B1", encoding="utf-8")
+        settings1 = SahteDesignSettings(200_000, {})
+        _pcbnew_yukle(SahteBoard(settings1))
+        import guvenli_routing_katmani as grk
+        monkeypatch.setattr(grk.subprocess, "run", _sahte_subprocess_run_uret([
+            {"violations": [{}] * 2, "unconnected_items": []},
+            {"violations": [{}] * 9, "unconnected_items": []},
+        ]))
+        hafiza1 = HataHafizasi(dosya_yolu=hafiza_yolu)
+        b1 = guvenli_yaz_ve_dogrula(
+            str(board1), lambda b: None, zone_refill_yap=False,
+            hata_hafizasi=hafiza1, degisiklik_aciklamasi="GbE J1 ESD hop via tunelleme",
+            proje="iot-kamera",
+        )
+        assert b1.durum == BulguDurumu.FAIL
+
+        # 2) İkinci board (farklı proje), AYNI strateji + AYNI hafıza dosyası.
+        board2 = tmp_path / "board2.kicad_pcb"
+        board2.write_text("B2", encoding="utf-8")
+        settings2 = SahteDesignSettings(200_000, {})
+        _pcbnew_yukle(SahteBoard(settings2))
+        monkeypatch.setattr(grk.subprocess, "run", _sahte_subprocess_run_uret([
+            {"violations": [{}] * 2, "unconnected_items": []},
+            {"violations": [{}] * 2, "unconnected_items": []},
+        ]))
+        hafiza2 = HataHafizasi(dosya_yolu=hafiza_yolu)
+        b2 = guvenli_yaz_ve_dogrula(
+            str(board2), lambda b: None, zone_refill_yap=False,
+            hata_hafizasi=hafiza2, degisiklik_aciklamasi="GbE J1 ESD hop via tunelleme",
+            proje="kafa-bandi-kamera",
+        )
+        assert "HAFIZA UYARISI" in b2.detay
+        assert "iot-kamera" in b2.detay

@@ -32,6 +32,20 @@ yolları test edildi, ama gerçek bir board üzerinde HENÜZ ÇALIŞTIRILMADI
 (bu proje bunu SENİN makinende, cm4-io-test gibi gerçek bir board ile
 doğrulaman gerektiğini defalarca vurgulamış — aynı disiplin burada da
 geçerli, bkz. `pcbnew_koprusu.py` AĞ/ARAÇ UYARISI).
+
+FAZ 0 MADDE 5 — `hata_hafizasi.py` ZORUNLU ENTEGRASYONU:
+--------------------------------------------------------------------------
+`guvenli_yaz_ve_dogrula()` artık isteğe bağlı bir `hata_hafizasi` +
+`degisiklik_aciklamasi` parametre çifti kabul eder. Verilirse: değişiklik
+uygulanmadan ÖNCE `benzer_kayitlari_bul()` ile "bu strateji daha önce
+denendi mi, işe yaramadı mı" sorgulanır ve sonuç `Bulgu.detay`'a bir HAFIZA
+UYARISI olarak eklenir (çağıran ajan/router bunu görüp stratejisini
+değiştirebilir — fonksiyon bunu KENDİLİĞİNDEN engel olarak kullanmaz, karar
+insanın/ajanın elinde kalır). Sonuç belli olunca (regresyon oldu/olmadı)
+otomatik olarak `BASARISIZ`/`COZULDU` kaydı hafızaya YAZILIR — böylece bir
+board'da öğrenilen "bu yaklaşım işe yaramadı" dersi, hiçbir çağıranın elle
+kaydetmesine gerek kalmadan projeler arası taşınır. `hata_hafizasi=None`
+(varsayılan) iken davranış TAMAMEN eskisiyle aynıdır (geriye dönük uyumlu).
 """
 
 from __future__ import annotations
@@ -44,6 +58,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from bulgu_sozlesmesi import Bulgu, bulgu_uret
+from hata_hafizasi import HataHafizasi, HataKaydi, KontrolTipi, Sonuc
 
 NM_PER_MM = 1_000_000
 
@@ -176,6 +191,9 @@ def guvenli_yaz_ve_dogrula(
     degisiklik_fonksiyonu: Callable[[Any], Any],
     kicad_cli: Optional[str] = None,
     zone_refill_yap: bool = True,
+    hata_hafizasi: Optional[HataHafizasi] = None,
+    degisiklik_aciklamasi: str = "",
+    proje: str = "",
 ) -> Bulgu:
     """TEK reusable "yaz-doğrula-gerekirse geri al" wrapper'ı — HER routing
     script'inin ortak temeli olması gereken fonksiyon (görev tanımı madde 4).
@@ -196,6 +214,17 @@ def guvenli_yaz_ve_dogrula(
     YAPILAMADIĞI için `regresyon_olcumu = "yapilamadi"` olarak
     raporlanır — sessizce "regresyon yok" VARSAYILMAZ.
 
+    `hata_hafizasi`/`degisiklik_aciklamasi` (FAZ 0 madde 5, ikisi de
+    OPSİYONEL — `None`/boş string iken davranış eskisiyle birebir aynıdır):
+    verilirse, değişiklik uygulanmadan ÖNCE `degisiklik_aciklamasi`
+    (ör. "MIPI_CAM0 P/N coupled route, In2.Cu via geçişi") hafızada
+    aranır; daha önce AYNI/BENZER bir strateji `BASARISIZ` olarak
+    kaydedilmişse bu, dönen `Bulgu.detay`'a bir HAFIZA UYARISI olarak
+    eklenir (fonksiyon bunu kendiliğinden bir "dur" sebebi SAYMAZ — karar
+    çağıran ajanda kalır, çünkü aynı görünen strateji farklı bağlamda işe
+    yarayabilir). Sonuç belli olduktan sonra (regresyon oldu/olmadı)
+    otomatik olarak `BASARISIZ`/`COZULDU` kaydı hafızaya yazılır.
+
     DOĞRULANMADI (bu ortamda pcbnew/kicad-cli gerçek bir board ile HENÜZ
     çalıştırılmadı — bkz. dosya başlığı).
     """
@@ -211,6 +240,17 @@ def guvenli_yaz_ve_dogrula(
     board_path_p = Path(board_path)
     if not board_path_p.is_file():
         return bulgu_uret(kontrol, taranan=0, detay=f"{board_path} bulunamadı.")
+
+    hafiza_uyarisi = ""
+    if hata_hafizasi is not None and degisiklik_aciklamasi:
+        eslesmeler = hata_hafizasi.benzer_kayitlari_bul(degisiklik_aciklamasi, tip=KontrolTipi.DRC)
+        basarisizlar = [k for _skor, k in eslesmeler if k.sonuc == Sonuc.BASARISIZ]
+        if basarisizlar:
+            ornekler = "; ".join(f"'{k.cozum}' ({k.tarih}, proje={k.proje or 'bilinmiyor'})" for k in basarisizlar[:3])
+            hafiza_uyarisi = (
+                f" [HAFIZA UYARISI: bu/benzer strateji hafızada {len(basarisizlar)} kez "
+                f"BAŞARISIZ olarak kayıtlı — {ornekler}]"
+            )
 
     yedek_yolu = str(board_path_p) + ".guvenli_yaz_yedek"
     shutil.copy2(board_path, yedek_yolu)
@@ -260,6 +300,18 @@ def guvenli_yaz_ve_dogrula(
 
     if regresyon_var:
         shutil.copy2(yedek_yolu, board_path)
+        if hata_hafizasi is not None and degisiklik_aciklamasi:
+            hata_hafizasi.kaydet(HataKaydi(
+                tip=KontrolTipi.DRC,
+                mesaj=degisiklik_aciklamasi,
+                kok_neden=(
+                    f"violations {onceki_violation}->{yeni_violation}, "
+                    f"unconnected_items {onceki_unconnected}->{yeni_unconnected}"
+                ),
+                cozum="Bu strateji DRC regresyonuna yol açtı, geri alındı — bir daha ÖNERİLMEMELİDİR.",
+                sonuc=Sonuc.BASARISIZ,
+                proje=proje,
+            ))
         return bulgu_uret(
             kontrol, taranan=1,
             ihlaller=[{
@@ -267,13 +319,26 @@ def guvenli_yaz_ve_dogrula(
                 "onceki_violation": onceki_violation, "yeni_violation": yeni_violation,
                 "onceki_unconnected": onceki_unconnected, "yeni_unconnected": yeni_unconnected,
             }],
-            detay=f"Board {yedek_yolu}'den geri yüklendi.",
+            detay=f"Board {yedek_yolu}'den geri yüklendi.{hafiza_uyarisi}",
         )
+
+    if hata_hafizasi is not None and degisiklik_aciklamasi:
+        hata_hafizasi.kaydet(HataKaydi(
+            tip=KontrolTipi.DRC,
+            mesaj=degisiklik_aciklamasi,
+            kok_neden="",
+            cozum=(
+                f"Bu strateji uygulandı, DRC regresyonu YOK (violations {onceki_violation}->{yeni_violation}, "
+                f"unconnected_items {onceki_unconnected}->{yeni_unconnected})."
+            ),
+            sonuc=Sonuc.COZULDU,
+            proje=proje,
+        ))
 
     detay = (
         f"Değişiklik uygulandı ve KORUNDU. regresyon_olcumu={regresyon_olcumu}, "
         f"violations: {onceki_violation}->{yeni_violation}, "
-        f"unconnected_items: {onceki_unconnected}->{yeni_unconnected}."
+        f"unconnected_items: {onceki_unconnected}->{yeni_unconnected}.{hafiza_uyarisi}"
     )
     if refill_hatasi:
         detay += f" UYARI: zone refill başarısız oldu ({refill_hatasi}) — DRC yine de çalıştırıldı."
