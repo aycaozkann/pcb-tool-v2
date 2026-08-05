@@ -52,13 +52,13 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 # Sadece geometri fonksiyonu - pcb_carpisma_radari modülü de `import pcbnew`
 # YAPMAZ (kendi lazy-import kuralına uyar), bu yüzden bu modülün başlıktaki
 # "pcbnew GEREKMEZ" iddiası bozulmuyor. Narrow-phase çarpışma testi (bkz.
 # `_hucre_engelli_mi`) için kullanılır.
-from pcb_carpisma_radari import nokta_segmente_dik_mesafe
+from pcb_carpisma_radari import IzEngeli, nokta_segmente_dik_mesafe
 
 Nokta = Tuple[float, float]
 IzgaraHucresi = Tuple[int, int]
@@ -153,6 +153,7 @@ def izgara_a_yildiz_ara(
     hucre_mm: float = 0.1,
     clearance_mm: float = 0.2,
     maks_dugum: int = 200_000,
+    ek_maliyet_fonksiyonu: Optional[Callable[[Nokta, Nokta], float]] = None,
 ) -> AramaSonucu:
     """Başlangıç-bitiş arası 8-yönlü A* ile IZGARA üzerinde en kısa yolu
     arar. Engeller `SinirKutusu`-uyumlu (x_min/y_min/x_max/y_max) herhangi
@@ -162,6 +163,17 @@ def izgara_a_yildiz_ara(
     `maks_dugum` aşılırsa arama DURDURULUR ve `bulundu_mu=False` +
     açıklayıcı `neden` döner — sessizce sonsuza kadar aramaya devam
     edilmez (bkz. dosya başlığı SINIR notu).
+
+    `ek_maliyet_fonksiyonu` (FAZ 0.5-2 — canlı SI/PI maliyeti): verilirse
+    HER aday adımın (a_mm, b_mm) segmenti için çağrılır, dönen değer o
+    adımın maliyetine EKLENİR (temel 1.0/√2 hareket maliyetinin üstüne).
+    Bu, "routing-SONRASI kontrol" yerine "routing-SIRASI karar" sağlar —
+    A* artık sadece geometrik en-kısa yolu değil, `si_pi_maliyet_
+    fonksiyonu_uret()` gibi bir fonksiyonla cezalandırılan bir yolu arar
+    (bkz. o fonksiyonun docstring'i). A*'ın OPTİMALLİĞİ bozulmaz: sezgi
+    (`_sezgisel`) bu ek maliyeti hesaba KATMAZ (her zaman `<=` gerçek
+    maliyet kalır, kabul edilebilirlik korunur) — sadece potansiyel
+    olarak daha fazla düğüm gezilir, YANLIŞ bir yol asla BULUNMAZ.
     """
     bas_h = _hucreye_cevir(baslangic, hucre_mm)
     bit_h = _hucreye_cevir(bitis, hucre_mm)
@@ -205,7 +217,12 @@ def izgara_a_yildiz_ara(
                 continue
             if _hucre_engelli_mi(komsu, engeller, hucre_mm, clearance_mm):
                 continue
-            aday_g = mevcut_g + maliyet
+            adim_maliyeti = maliyet
+            if ek_maliyet_fonksiyonu is not None:
+                adim_maliyeti += ek_maliyet_fonksiyonu(
+                    _noktaya_cevir(mevcut, hucre_mm), _noktaya_cevir(komsu, hucre_mm),
+                )
+            aday_g = mevcut_g + adim_maliyeti
             if aday_g < g_skoru.get(komsu, float("inf")):
                 g_skoru[komsu] = aday_g
                 geldigi[komsu] = mevcut
@@ -316,6 +333,7 @@ def izgara_a_yildiz_ara_coupled(
     clearance_mm: float = 0.2,
     maks_dugum: int = 200_000,
     stub_uzunluk_mm: float = 0.5,
+    ek_maliyet_fonksiyonu: Optional[Callable[[Nokta, Nokta], float]] = None,
 ) -> CoupledAramaSonucu:
     """P/N net çiftini SABİT `gap_mm` ile TEK bir arama olarak rotalar
     (bkz. dosya başlığı "DİFERANSİYEL ÇİFT" notu).
@@ -365,6 +383,7 @@ def izgara_a_yildiz_ara_coupled(
     merkez_sonuc = izgara_a_yildiz_ara(
         merkez_bas, merkez_bit, engeller, hucre_mm=hucre_mm,
         clearance_mm=koridor_clearance_mm, maks_dugum=maks_dugum,
+        ek_maliyet_fonksiyonu=ek_maliyet_fonksiyonu,
     )
     if not merkez_sonuc.bulundu_mu:
         return CoupledAramaSonucu([], [], merkez_sonuc, False, merkez_sonuc.neden)
@@ -435,6 +454,76 @@ def via_yerlesimi_gecerli_mi(
 
 
 # ------------------------------------------------------------------
+# 2c-2. CANLI SI/PI MALİYET FONKSİYONLARI (FAZ 0.5-2)
+#     routing-SIRASI karar verici — routing-SONRASI kontrol DEĞİL.
+#     `empedans_cozucu.py`/`pcb_stackup_planner.py`'nin GERÇEK stackup
+#     çözümünü YENİDEN HESAPLAMAZ, sadece GİRDİ olarak alır (tek kaynak
+#     stackup çözücüde kalır — bkz. her iki fonksiyonun kendi notu).
+# ------------------------------------------------------------------
+
+def si_pi_maliyet_fonksiyonu_uret(
+    diger_hs_izler: Sequence[IzEngeli],
+    net_genislik_mm: float,
+    w_kurali_carpani: float = 3.0,
+    ihlal_agirligi: float = 5.0,
+) -> Callable[[Nokta, Nokta], float]:
+    """A* arama adımına EKLENECEK (bkz. `izgara_a_yildiz_ara(..., ek_
+    maliyet_fonksiyonu=...)`) bir SI-farkındalı maliyet fonksiyonu üretir.
+
+    3W KURALI: paralel yüksek-hızlı izler arası mesafe >= `w_kurali_
+    carpani * net_genislik_mm` (varsayılan 3x — crosstalk/EMI için
+    endüstri standardı) olmalı. Üretilen kapanış (closure), her aday A*
+    adımının (a->b segmentinin ORTA NOKTASI) `diger_hs_izler`'deki
+    (BAŞKA bir net'e ait, `pcb_carpisma_radari.IzEngeli`) en yakın ize
+    olan mesafesini ölçer; mesafe eşiğin ALTINDAYSA eksik mesafeyle
+    orantılı bir CEZA döner — eşiğin üstündeyse ceza TAM SIFIRDIR
+    (temel A* maliyetine hiçbir şey eklenmez).
+
+    `empedans_cozucu.py` BAĞLANTISI: `net_genislik_mm`, çağıran tarafın
+    `pcb_stackup_planner.empedans_geometrisi_coz()`'den (hedef empedansı
+    KARŞILAYAN gerçek W) aldığı değer OLMALIDIR — bu fonksiyon o
+    geometriyi YENİDEN HESAPLAMAZ. Bu, "routing-sonrası empedans/3W
+    kontrolü" (`emi_emc_kural_motoru.py::uc_w_kuraline_cevir` gibi)
+    modellerinden FARKLI olarak, ihlali routing BAŞLAMADAN ÖNCE değil
+    routing SIRASINDA (her adayı puanlayarak) önler.
+
+    `diger_hs_izler` BOŞSA fonksiyon her zaman 0.0 döner (performans
+    kısayolu — boş bir listede en_yakin hesaplamak ValueError fırlatırdı,
+    burada bilerek erken çıkılır)."""
+    esik_mm = w_kurali_carpani * net_genislik_mm
+
+    def _maliyet(a: Nokta, b: Nokta) -> float:
+        if not diger_hs_izler:
+            return 0.0
+        orta_x, orta_y = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+        en_yakin = min(
+            nokta_segmente_dik_mesafe(orta_x, orta_y, iz.x1, iz.y1, iz.x2, iz.y2)
+            for iz in diger_hs_izler
+        )
+        if en_yakin >= esik_mm:
+            return 0.0
+        eksik = esik_mm - en_yakin
+        return ihlal_agirligi * eksik
+
+    return _maliyet
+
+
+def via_impedans_sureksizligi_maliyeti(via_maliyeti_temel: float, empedans_sapma_yuzde: float = 0.0) -> float:
+    """Bir via'nın "empedans süreksizliği" cezasını, stackup çözücüden
+    gelen empedans sapma yüzdesiyle (`pcb_stackup_planner.empedans_
+    geometrisi_coz()`'ün `en_iyi.hata_yuzde` alanı) ÖLÇEKLER.
+
+    Gerekçe: her via KENDİ BAŞINA küçük bir empedans süreksizliğidir
+    (referans düzlem geçişi, ek kapasitans). Geometri ZATEN hedef
+    empedanstan sapmışsa (`empedans_sapma_yuzde > 0`), üstüne bir via
+    daha eklemek DAHA RİSKLİDİR — bu fonksiyon o riski `via_maliyeti`'ni
+    DOĞRUSAL olarak büyüterek A*'a yansıtır. `empedans_sapma_yuzde=0.0`
+    (varsayılan) -> `via_maliyeti_temel` DEĞİŞMEDEN döner (geriye dönük
+    uyumlu, mevcut çağıranları BOZMAZ)."""
+    return via_maliyeti_temel * (1.0 + empedans_sapma_yuzde / 100.0)
+
+
+# ------------------------------------------------------------------
 # 2d. KATMAN/VIA-FARKINDALI A*
 #     (arama durumu artık (hücre, katman) — via kullanmanın maliyeti var
 #     VE via_yerlesimi_gecerli_mi() geçmeyen bir nokta via YERİ olarak
@@ -477,6 +566,8 @@ def izgara_a_yildiz_ara_katmanli(
     komsu_delikler: Sequence[Tuple[float, float, float]] = (),
     min_annular_ring_mm: float = 0.15,
     min_hole_to_hole_mm: float = 0.2,
+    ek_maliyet_fonksiyonu: Optional[Callable[[Nokta, Nokta], float]] = None,
+    empedans_sapma_yuzde: float = 0.0,
 ) -> KatmanliAramaSonucu:
     """`izgara_a_yildiz_ara()`'nın KATMAN-farkında genişlemesi.
 
@@ -491,6 +582,17 @@ def izgara_a_yildiz_ara_katmanli(
     `katman_engelleri`, `{katman_indeksi: [engel, ...]}` biçiminde HER
     katmanın KENDİ engel listesini taşır — sözlükte olmayan bir katman
     engelsiz kabul edilir.
+
+    `ek_maliyet_fonksiyonu` (FAZ 0.5-2): `izgara_a_yildiz_ara()` ile AYNI
+    sözleşme — SADECE aynı-katman hareketlerine uygulanır (via geçişlerine
+    DEĞİL, o zaten `via_maliyeti` ile ayrı fiyatlandırılıyor).
+
+    `empedans_sapma_yuzde` (FAZ 0.5-2): `pcb_stackup_planner.
+    empedans_geometrisi_coz()`'ün `hata_yuzde` alanından beslenir —
+    `via_impedans_sureksizligi_maliyeti()` ile `via_maliyeti`'ni ÖLÇEKLER
+    (hedeften ne kadar sapılmışsa via açmak o kadar PAHALI hale gelir).
+    Varsayılan 0.0 -> `via_maliyeti` DEĞİŞMEDEN kullanılır (geriye dönük
+    uyumlu).
     """
     if katman_sayisi < 1:
         raise ValueError("katman_sayisi >= 1 olmalı")
@@ -571,7 +673,12 @@ def izgara_a_yildiz_ara_katmanli(
                 continue
             if _katman_engelli_mi(komsu_h, mk):
                 continue
-            aday_g = mevcut_g + maliyet
+            adim_maliyeti = maliyet
+            if ek_maliyet_fonksiyonu is not None:
+                adim_maliyeti += ek_maliyet_fonksiyonu(
+                    _noktaya_cevir((mx, my), hucre_mm), _noktaya_cevir(komsu_h, hucre_mm),
+                )
+            aday_g = mevcut_g + adim_maliyeti
             if aday_g < g_skoru.get(komsu, float("inf")):
                 g_skoru[komsu] = aday_g
                 geldigi[komsu] = mevcut
@@ -580,6 +687,7 @@ def izgara_a_yildiz_ara_katmanli(
 
         gecerli, _sebep = _via_gecerli_mi((mx, my))
         if gecerli:
+            efektif_via_maliyeti = via_impedans_sureksizligi_maliyeti(via_maliyeti, empedans_sapma_yuzde)
             for hedef_katman in range(katman_sayisi):
                 if hedef_katman == mk:
                     continue
@@ -588,7 +696,7 @@ def izgara_a_yildiz_ara_katmanli(
                     continue
                 if _katman_engelli_mi((mx, my), hedef_katman):
                     continue
-                aday_g = mevcut_g + via_maliyeti
+                aday_g = mevcut_g + efektif_via_maliyeti
                 if aday_g < g_skoru.get(komsu, float("inf")):
                     g_skoru[komsu] = aday_g
                     geldigi[komsu] = mevcut
