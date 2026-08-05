@@ -13,17 +13,21 @@ import math
 
 import pytest
 
-from bulgu_sozlesmesi import BulguDurumu
+from bulgu_sozlesmesi import Bulgu, BulguDurumu
 
 from ngspice_koprusu import (
     AcSweep,
     DcSweep,
+    DEKUPLAJ_VARSAYILAN_MAKS_MESAFE_MM,
+    DekuplajOnerisi,
     ModelTuru,
     OpAnalizi,
     ORNEK_NGSPICE_CIKTISI,
     RayHedefi,
+    TranAnalizi,
     ac_bant_dogrula,
     cikti_ayristir,
+    decoupling_onerisi_uret,
     netlist_analiz_ekle,
     ngspice_calistir,
     ngspice_yolu_bul,
@@ -31,6 +35,7 @@ from ngspice_koprusu import (
     sembol_modeli_eksik_olanlar,
     simulasyon_raporu_uret,
     simulasyon_raporu_yaz,
+    transient_calistir,
     voltaj_dususu_dogrula,
     _testin_bos_olmadigini_kanitla,
 )
@@ -277,6 +282,109 @@ def test_ac_bant_ngspice_yoksa_kapsam_yok():
 
 
 # ------------------------------------------------------------------
+# Transient (.tran) — "sanal osiloskop probu"
+# ------------------------------------------------------------------
+
+def test_tran_analizi_spice_satiri():
+    assert TranAnalizi(1e-5, 1e-3).spice_satiri() == ".tran 1e-05 0.001"
+
+
+def test_tran_analizi_baslangic_verilirse_satira_eklenir():
+    satir = TranAnalizi(1e-5, 1e-3, baslangic_s=5e-4).spice_satiri()
+    assert satir == ".tran 1e-05 0.001 0.0005"
+
+
+def test_transient_calistir_bos_netler_reddedilir(tmp_path):
+    """Neyi ölçtüğünü bilmeyen bir 'osiloskop' rapor değildir."""
+    netlist = tmp_path / "devre.cir"
+    netlist.write_text("R1 a b 1\n.end\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        transient_calistir(str(netlist), 1e-3, 1e-5, [], str(tmp_path / "out"))
+
+
+def test_transient_calistir_ngspice_yoksa_kapsam_yok_ve_dosya_yazilmaz(tmp_path, monkeypatch):
+    import ngspice_koprusu
+
+    monkeypatch.setattr(ngspice_koprusu, "ngspice_calistir", lambda *a, **k: None)
+    netlist = tmp_path / "devre.cir"
+    netlist.write_text("R1 vin vout 1k\nC1 vout 0 1u\n.end\n", encoding="utf-8")
+    cikti_dir = tmp_path / "out"
+
+    bulgu = transient_calistir(
+        str(netlist), sure_s=1e-3, adim_s=1e-5,
+        prob_netleri=["vout"], calisma_dizini=str(cikti_dir),
+    )
+
+    assert bulgu.durum == BulguDurumu.KAPSAM_YOK
+    assert bulgu.taranan == 0
+    assert "KOŞULMADI" in bulgu.detay
+    assert not cikti_dir.exists()  # sahte CSV/PNG UYDURULMADI
+
+
+def test_transient_calistir_bulunmayan_prob_net_ihlal_olarak_raporlanir(tmp_path, monkeypatch):
+    """Bir prob net simülasyon çıktısında yoksa bu sessizce atlanmaz — ihlal
+    olarak raporlanır (voltaj_dususu_dogrula'nın 'düğüm çıktıda yok'
+    deseniyle AYNI disiplin), diğer probun CSV'si yine de yazılır."""
+    import ngspice_koprusu
+    from ngspice_koprusu import SimulasyonSonucu
+
+    sahte_sonuc = SimulasyonSonucu(
+        veri={"v(vout)": [(0.0, 0.0), (1e-3, 3.3)]},
+        satir_sayisi=2, ngspice_surumu="ngspice-46 (sahte)",
+    )
+    monkeypatch.setattr(ngspice_koprusu, "ngspice_calistir", lambda *a, **k: sahte_sonuc)
+    netlist = tmp_path / "devre.cir"
+    netlist.write_text("R1 vin vout 1k\nC1 vout 0 1u\n.end\n", encoding="utf-8")
+    cikti_dir = tmp_path / "out"
+
+    bulgu = transient_calistir(
+        str(netlist), 1e-3, 1e-5, ["vout", "hic_yok"], str(cikti_dir),
+    )
+
+    assert bulgu.durum == BulguDurumu.FAIL
+    assert bulgu.taranan == 2
+    assert len(bulgu.ihlaller) == 1
+    assert bulgu.ihlaller[0]["net"] == "hic_yok"
+    assert (cikti_dir / "tran_vout.csv").exists()
+
+
+@pytest.mark.skipif(
+    ngspice_yolu_bul() is None,
+    reason="bu makinede ngspice kurulu değil — gerçek .tran koşumu atlandı, sessizce PASS SAYILMAZ",
+)
+def test_transient_calistir_gercek_ngspice_ile_rc_sarj_egrisi(tmp_path):
+    """DOĞRULAMA (bu makinede GERÇEKTEN koşturuldu): R=1k, C=1uF (tau=1ms)
+    RC şarj devresi 5*tau boyunca koşturulur; ngspice'ın ürettiği son nokta
+    (4.966345V) analitik V(t)=5*(1-e^(-t/tau)) (4.966310V) ile ~35uV fark
+    içinde örtüştü — 'kod çalıştı' ile 'kod DOĞRU sonuç verdi' arasındaki
+    fark burada GERÇEK ölçümle kapatıldı, tahminle DEĞİL."""
+    netlist = tmp_path / "rc.cir"
+    netlist.write_text(
+        "* RC transient test devresi\n"
+        "V1 vin 0 PULSE(0 5 0 1n 1n 10m 20m)\n"
+        "R1 vin vout 1k\n"
+        "C1 vout 0 1u\n"
+        ".end\n",
+        encoding="utf-8",
+    )
+    cikti_dir = tmp_path / "out"
+
+    bulgu = transient_calistir(
+        str(netlist), sure_s=5e-3, adim_s=5e-5,
+        prob_netleri=["vin", "vout"], calisma_dizini=str(cikti_dir),
+    )
+
+    assert bulgu.durum == BulguDurumu.PASS
+    assert bulgu.taranan == 2
+    satirlar = (cikti_dir / "tran_vout.csv").read_text(encoding="utf-8").strip().splitlines()
+    son_zaman, son_voltaj = (float(x) for x in satirlar[-1].split(","))
+    beklenen = 5.0 * (1.0 - math.exp(-son_zaman / 1e-3))
+    assert son_voltaj == pytest.approx(beklenen, abs=5e-3)
+    assert (cikti_dir / "tran_osiloskop.png").exists()
+    assert (cikti_dir / "tran_vin.csv").exists()
+
+
+# ------------------------------------------------------------------
 # Rapor (MASTER_RULEBOOK Faz 3)
 # ------------------------------------------------------------------
 
@@ -336,3 +444,109 @@ def test_fault_injection_gercekten_kirilir():
 
 def test_oz_testleri_temiz():
     assert oz_testleri_calistir() == []
+
+
+# ------------------------------------------------------------------
+# FAZ 0.5-3: decoupling_onerisi_uret (PDN otomatik dekuplaj önerisi)
+# ------------------------------------------------------------------
+
+def test_pass_bulguda_oneri_uretilmez():
+    """Hiçbir ray tolerans dışına çıkmadıysa öneriye GEREK yoktur."""
+    sonuc = cikti_ayristir(ORNEK_NGSPICE_CIKTISI)
+    bulgu = voltaj_dususu_dogrula(sonuc, [RayHedefi("vout", 3.3, tolerans_yuzde=10.0)])
+    assert bulgu.durum == BulguDurumu.PASS
+    assert decoupling_onerisi_uret(bulgu) == []
+
+
+def test_kapsam_yok_bulguda_oneri_uretilemez():
+    """Simülasyon hiç koşmadıysa (KAPSAM_YOK) öneri de UYDURULAMAZ."""
+    bulgu = voltaj_dususu_dogrula(None, [RayHedefi("vout", 3.3)])
+    assert bulgu.durum == BulguDurumu.KAPSAM_YOK
+    assert decoupling_onerisi_uret(bulgu) == []
+
+
+def test_hafif_dusumde_tek_100nf_onerilir():
+    """dusum_yuzdesi <= %2 -> sadece standart 100nF (en hafif kademe)."""
+    bulgu = Bulgu(
+        kontrol="simulasyon_voltaj_dususu",
+        durum=BulguDurumu.FAIL,
+        taranan=1,
+        ihlaller=[{
+            "dugum": "v3v3",
+            "nominal_v": 3.3,
+            "alt_sinir_v": 3.135,
+            "olculen_min_v": 3.28,
+            "dusum_mv": 20.0,  # %0.6
+        }],
+    )
+    oneriler = decoupling_onerisi_uret(bulgu)
+    assert len(oneriler) == 1
+    assert oneriler[0].dugum == "v3v3"
+    assert oneriler[0].onerilen_kapasitans_f == [100e-9]
+    assert oneriler[0].maks_mesafe_mm == DEKUPLAJ_VARSAYILAN_MAKS_MESAFE_MM
+
+
+def test_orta_dusumde_ek_1uf_onerilir():
+    """%2 < dusum_yuzdesi <= %5 -> 100nF + 1uF ara-frekans desteği."""
+    bulgu = Bulgu(
+        kontrol="simulasyon_voltaj_dususu",
+        durum=BulguDurumu.FAIL,
+        taranan=1,
+        ihlaller=[{
+            "dugum": "v1v8",
+            "nominal_v": 1.8,
+            "alt_sinir_v": 1.71,
+            "olculen_min_v": 1.74,
+            "dusum_mv": 60.0,  # %3.33
+        }],
+    )
+    oneriler = decoupling_onerisi_uret(bulgu)
+    assert oneriler[0].onerilen_kapasitans_f == [100e-9, 1e-6]
+
+
+def test_agir_dusumde_ek_10uf_bulk_onerilir():
+    """dusum_yuzdesi > %5 -> gerçek test verisiyle (bkz.
+    test_voltaj_dususu_sinir_altinda_fail_ve_dusumu_raporlar) 100nF + 10uF bulk."""
+    sonuc = cikti_ayristir(ORNEK_NGSPICE_CIKTISI)
+    bulgu = voltaj_dususu_dogrula(sonuc, [RayHedefi("vout", 3.3, min_kabul_v=3.25)])
+    assert bulgu.durum == BulguDurumu.FAIL
+    oneriler = decoupling_onerisi_uret(bulgu)
+    assert len(oneriler) == 1
+    assert oneriler[0].onerilen_kapasitans_f == [100e-9, 10e-6]
+    assert "vout" in oneriler[0].gerekce
+    assert "3.0" in oneriler[0].gerekce or "3mm" in oneriler[0].gerekce.lower()
+
+
+def test_dugum_hic_izlenmemis_ihlali_oneriye_donusturmez():
+    """`izlenmeyen_dugum` sınıfı ihlalde nominal_v/dusum_mv YOKTUR — bu
+    ihlal için uydurma bir öneri ÜRETİLMEMELİDİR, sessizce atlanmalıdır."""
+    bulgu = voltaj_dususu_dogrula(cikti_ayristir(ORNEK_NGSPICE_CIKTISI), [RayHedefi("v1v8", 1.8)])
+    assert bulgu.durum == BulguDurumu.FAIL
+    assert "sebep" in bulgu.ihlaller[0]
+    assert decoupling_onerisi_uret(bulgu) == []
+
+
+def test_maks_mesafe_mm_disaridan_override_edilebilir():
+    """Docstring'de belgelenen 1.5mm'lik daha sıkı hedef İSTENİRSE açıkça
+    verilebilir — sessizce varsayılmaz (bkz. modüldeki SINIR/TUTARSIZLIK NOTU)."""
+    bulgu = Bulgu(
+        kontrol="simulasyon_voltaj_dususu",
+        durum=BulguDurumu.FAIL,
+        taranan=1,
+        ihlaller=[{
+            "dugum": "v3v3",
+            "nominal_v": 3.3,
+            "alt_sinir_v": 3.135,
+            "olculen_min_v": 3.28,
+            "dusum_mv": 20.0,
+        }],
+    )
+    oneriler = decoupling_onerisi_uret(bulgu, maks_mesafe_mm=1.5)
+    assert oneriler[0].maks_mesafe_mm == 1.5
+
+
+def test_varsayilan_mesafe_gercekten_uygulanan_kontrolle_tek_kaynak():
+    """`DEKUPLAJ_VARSAYILAN_MAKS_MESAFE_MM`, pcbnew_koprusu.py::
+    dekuplaj_mesafe_kontrolu()'nun GERÇEKTEN UYGULANAN varsayılanıyla
+    (3.0mm) TEK KAYNAK olmalı — dokümantasyondaki 1.5mm ile DEĞİL."""
+    assert DEKUPLAJ_VARSAYILAN_MAKS_MESAFE_MM == 3.0

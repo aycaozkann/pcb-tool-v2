@@ -50,6 +50,7 @@ DOĞRULAMA DURUMU (bu makinede GERÇEKTEN koşturuldu):
 
 from __future__ import annotations
 
+import csv
 import re
 import shutil
 import subprocess
@@ -108,6 +109,25 @@ class OpAnalizi:
 
     def spice_satiri(self) -> str:
         return ".op"
+
+
+@dataclass
+class TranAnalizi:
+    """`.tran <adim_s> <sure_s> [<baslangic_s>]` — zaman-domeni (transient)
+    analiz. "Sanal osiloskop probu" modunun temeli: DC/AC sweep'in aksine
+    sweep ekseni ZAMANDIR — `cikti_ayristir()` "time" başlığını ZATEN
+    tanıyor (bkz. `sweep_var` tespiti), bu yüzden mevcut ayrıştırma/koşum
+    zinciri (`netlist_analiz_ekle`, `ngspice_calistir`) DEĞİŞTİRİLMEDEN
+    tekrar kullanılabildi."""
+
+    adim_s: float
+    sure_s: float
+    baslangic_s: float = 0.0
+
+    def spice_satiri(self) -> str:
+        if self.baslangic_s > 0:
+            return f".tran {self.adim_s} {self.sure_s} {self.baslangic_s}"
+        return f".tran {self.adim_s} {self.sure_s}"
 
 
 @dataclass
@@ -550,6 +570,224 @@ def ac_bant_dogrula(
         ihlaller=ihlaller,
         detay=f"bant={f_alt_hz}-{f_ust_hz}Hz, atlanan_gecersiz_nokta={atlanan}",
     )
+
+
+# ------------------------------------------------------------------
+# 4b. TRANSIENT (.tran) — "sanal osiloskop probu"
+# ------------------------------------------------------------------
+#
+# GÖREV (openEMS/SI köprüsü ile birlikte istendi): herhangi bir net'te
+# zamana göre voltaj/akım eğrisi, CSV + PNG grafik olarak. Bu, DC/AC
+# sweep'in YANINA eklendi — mevcut `spice_netlist_uret`/`netlist_analiz_ekle`/
+# `ngspice_calistir`/`cikti_ayristir` zincirinin HİÇBİRİ değiştirilmedi,
+# sadece `TranAnalizi` (yukarıda) bu zincire YENİ bir analiz tipi olarak
+# eklendi ve bu fonksiyon CSV/PNG çıktısını üstüne koyuyor.
+
+
+def _dosya_adi_guvenli(net_adi: str) -> str:
+    """Bir net adını (ör. "v(vout)", "I2C_SDA") güvenli bir dosya adı
+    parçasına çevirir — alfasayısal olmayan karakterler `_` ile değişir."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", net_adi).strip("_") or "net"
+
+
+def transient_calistir(
+    netlist_path: str,
+    sure_s: float,
+    adim_s: float,
+    prob_netleri: Sequence[str],
+    calisma_dizini: str,
+    ngspice: Optional[str] = None,
+    zaman_asimi_s: int = 120,
+) -> Bulgu:
+    """`.tran` koşumu — her `prob_netleri` girdisi için (zaman, voltaj)
+    çift serisi `calisma_dizini/tran_<net>.csv`'ye yazılır, hepsi TEK bir
+    `calisma_dizini/tran_osiloskop.png` grafiğinde üst üste çizilir
+    ("sanal osiloskop probu").
+
+    SAYI UYDURMA YASAĞI (dosyanın geri kalanıyla AYNI disiplin): `ngspice`
+    kurulu değilse (`ngspice_calistir()` `None` dönerse) HİÇBİR CSV/PNG
+    YAZILMAZ, `KAPSAM_YOK` döner. `matplotlib` kurulu değilse CSV'ler yine
+    yazılır (ham veri, çizim ayrı bir katman) ama PNG atlanır — bu durum
+    `detay` alanına açıkça yazılır, sessizce yok sayılmaz.
+
+    Her `prob_netleri` girdisi simülasyon çıktısında BULUNAMAZSA (net
+    netlist'te yok / izlenen düğümler arasına eklenmemiş) bu bir İHLALDİR
+    (`voltaj_dususu_dogrula`'nın "düğüm çıktıda yok" deseniyle AYNI) —
+    sessizce atlanmaz, `taranan` her zaman `len(prob_netleri)`'tir.
+
+    DOĞRULAMA DURUMU: bu makinede `ngspice_con.exe` KURULU — RC şarj/deşarj
+    devresi gibi basit bir devrede uçtan uca (netlist -> .tran -> CSV/PNG)
+    GERÇEKTEN koşturulup test edildi, bkz. `test_ngspice_koprusu.py`.
+    """
+    if not prob_netleri:
+        raise ValueError(
+            "en az bir prob net verilmeli — neyi ölçtüğünü bilmeyen bir "
+            "'osiloskop' rapor değildir."
+        )
+
+    kontrol = "ngspice_transient"
+    netlist_metni = Path(netlist_path).read_text(encoding="utf-8")
+    analiz = TranAnalizi(adim_s=adim_s, sure_s=sure_s)
+    tran_netlist_metni = netlist_analiz_ekle(netlist_metni, analiz, prob_netleri)
+
+    tran_netlist_path = str(Path(netlist_path).with_name(Path(netlist_path).stem + "_tran.cir"))
+    Path(tran_netlist_path).write_text(tran_netlist_metni, encoding="utf-8")
+
+    sonuc = ngspice_calistir(tran_netlist_path, ngspice=ngspice, zaman_asimi_s=zaman_asimi_s)
+    if sonuc is None:
+        return bulgu_uret(
+            kontrol, taranan=0,
+            detay="ngspice kurulu değil — transient (.tran) simülasyonu KOŞULMADI.",
+        )
+    if sonuc.satir_sayisi == 0:
+        return bulgu_uret(
+            kontrol, taranan=0,
+            detay="ngspice çıktısında ayrıştırılabilir veri satırı yok — netlist/analiz hatalı olabilir.",
+        )
+
+    calisma_dir = Path(calisma_dizini)
+    calisma_dir.mkdir(parents=True, exist_ok=True)
+
+    taranan = 0
+    ihlaller: List[Dict[str, object]] = []
+    seriler: Dict[str, List[Tuple[float, float]]] = {}
+    for net in prob_netleri:
+        taranan += 1
+        anahtar = net if net in sonuc.veri else f"v({net})"
+        seri = sonuc.veri.get(anahtar)
+        if not seri:
+            ihlaller.append({
+                "net": net,
+                "sebep": "simülasyon çıktısında bu düğüm YOK (izlenen düğümler arasına eklenmemiş veya netlist'te yok)",
+            })
+            continue
+        seriler[net] = seri
+        csv_yolu = calisma_dir / f"tran_{_dosya_adi_guvenli(net)}.csv"
+        with open(csv_yolu, "w", newline="", encoding="utf-8") as fh:
+            yazici = csv.writer(fh)
+            yazici.writerow(["zaman_s", "voltaj_v"])
+            yazici.writerows(seri)
+
+    png_yolu: Optional[Path] = None
+    matplotlib_yok_notu = ""
+    if seriler:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            matplotlib_yok_notu = " matplotlib kurulu değil — PNG üretilmedi, sadece CSV yazıldı."
+        else:
+            fig, ax = plt.subplots()
+            for net, seri in seriler.items():
+                ax.plot([t for t, _ in seri], [v for _, v in seri], label=net)
+            ax.set_xlabel("zaman (s)")
+            ax.set_ylabel("voltaj (V)")
+            ax.set_title("Sanal Osiloskop (ngspice .tran)")
+            ax.legend()
+            ax.grid(True)
+            png_yolu = calisma_dir / "tran_osiloskop.png"
+            fig.savefig(png_yolu)
+            plt.close(fig)
+
+    return bulgu_uret(
+        kontrol, taranan, ihlaller,
+        f"ngspice={sonuc.ngspice_surumu}, sure_s={sure_s}, adim_s={adim_s}, "
+        f"csv_yazilan_netler={sorted(seriler.keys())}, "
+        f"png={str(png_yolu) if png_yolu else '(yazilmadi)'}."
+        + matplotlib_yok_notu,
+    )
+
+
+# ------------------------------------------------------------------
+# 4c. PDN OTOMATİK DEKUPLAJ ÖNERİSİ (FAZ 0.5-3)
+# ------------------------------------------------------------------
+#
+# NEDEN BU BÖLÜM VAR: `voltaj_dususu_dogrula()` bir rayın tolerans dışına
+# ÇIKTIĞINI SÖYLER ama "peki ne ekleyeyim" sorusuna cevap VERMEZ — bu
+# bölüm o boşluğu, `voltaj_dususu_dogrula()`'nın ÜRETTİĞİ Bulgu'yu GİRDİ
+# olarak alıp kapatır (simülasyonu TEKRARLAMAZ, sadece SONUCUNU YORUMLAR).
+
+@dataclass
+class DekuplajOnerisi:
+    """Bir ray için üretilen kapasitör değeri + yerleşim mesafesi önerisi."""
+
+    dugum: str
+    onerilen_kapasitans_f: List[float]  # ör. [100e-9] ya da [100e-9, 10e-6]
+    maks_mesafe_mm: float
+    gerekce: str
+
+
+# Eşik-bazlı, KURAL-OF-THUMB kademeler — gerçek geçici akım (dI/dt) ve ESR
+# verisi olmadan KESİN bir C = I*dt/dV hesabı YAPILAMAZ (`voltaj_dususu_
+# dogrula()`'nın Bulgu'sunda sadece nominal/ölçülen gerilim vardır, akım
+# YOKTUR). Bu tablo "düşüm ne kadar kötüyse ne kadar ek kapasitans"
+# sorusuna KABA bir ilk yanıt verir — kritik raylarda gerçek bir PDN/ESR
+# analizi (bu modülün kapsamı DIŞINDA) ile DOĞRULANMALIDIR.
+_DUSUM_YUZDESI_KADEMELERI: Tuple[Tuple[float, Tuple[float, ...]], ...] = (
+    (2.0, (100e-9,)),                 # hafif: standart 100nF yeterli sayılır
+    (5.0, (100e-9, 1e-6)),            # orta: +1uF ara-frekans desteği
+    (float("inf"), (100e-9, 10e-6)),  # ağır: +10uF bulk
+)
+
+# SINIR/TUTARSIZLIK NOTU (dürüstlük, kod incelemesinde bulundu): kod
+# tabanında dekuplaj mesafesi için İKİ farklı sayı dolaşıyor —
+# `kuvvet_yonelimli_yerlesim.py`'nin docstring'i "decoupling <=1.5mm"
+# diyor (yerleşim motorunun kendi kısıt YORUMU, hiçbir yerde ZORUNLU
+# parametre olarak GEÇMİYOR), ama `pcbnew_koprusu.py::dekuplaj_mesafe_
+# kontrolu()`'nun GERÇEKTEN ÇALIŞAN varsayılan parametresi 3.0mm'dir. Bu
+# fonksiyonun varsayılanı GERÇEKTEN UYGULANAN 3.0mm'YE eşitlendi (tek
+# kaynak: fiilen ÇALIŞAN kontrol) — 1.5mm'lik daha sıkı hedef isteniyorsa
+# `maks_mesafe_mm=1.5` AÇIKÇA verilmelidir, sessizce varsayılmaz.
+DEKUPLAJ_VARSAYILAN_MAKS_MESAFE_MM = 3.0
+
+
+def decoupling_onerisi_uret(
+    bulgu: Bulgu,
+    maks_mesafe_mm: float = DEKUPLAJ_VARSAYILAN_MAKS_MESAFE_MM,
+) -> List[DekuplajOnerisi]:
+    """`voltaj_dususu_dogrula()`'nın ÜRETTİĞİ `Bulgu`'yu alıp, tolerans
+    dışına çıkan HER ray için kapasitör değeri + yerleşim mesafesi önerisi
+    üretir — simülasyonu TEKRARLAMAZ, sadece onun SONUCUNU yorumlar.
+
+    `bulgu.durum != FAIL` ise (PASS — hiçbir ray tolerans dışına çıkmadı,
+    veya KAPSAM_YOK — simülasyon hiç koşmadı) BOŞ liste döner: PASS'ta
+    öneri GEREKMEZ, KAPSAM_YOK'ta öneri ÜRETİLEMEZ (simülasyon verisi
+    yok — sayı uydurma yasağı, bu modülün geri kalanıyla AYNI disiplin).
+
+    `maks_mesafe_mm`, `pcbnew_koprusu.py::dekuplaj_mesafe_kontrolu()`'nun
+    GERÇEKTEN UYGULANAN varsayılanıyla (3.0mm) TEK KAYNAK tutulur — bu
+    fonksiyonun önerdiği yerleşim, o kontrolün DENETLEDİĞİ kritere UYUMLU
+    olsun diye (bkz. yukarıdaki SINIR/TUTARSIZLIK NOTU).
+    """
+    if bulgu.durum != BulguDurumu.FAIL:
+        return []
+
+    oneriler: List[DekuplajOnerisi] = []
+    for ihlal in bulgu.ihlaller:
+        nominal_v = ihlal.get("nominal_v")
+        dusum_mv = ihlal.get("dusum_mv")
+        dugum = ihlal.get("dugum")
+        if nominal_v is None or dusum_mv is None or dugum is None or nominal_v <= 0:
+            continue  # bu ihlal beklenen şemada değil (ör. "düğüm yok" tipi) — öneri ÜRETİLEMEZ
+        dusum_yuzdesi = (dusum_mv / 1000.0) / nominal_v * 100.0
+        kapasitans_degerleri = next(
+            degerler for esik, degerler in _DUSUM_YUZDESI_KADEMELERI if dusum_yuzdesi <= esik
+        )
+        deger_metni = ", ".join(
+            f"{v * 1e9:.0f}nF" if v < 1e-6 else f"{v * 1e6:.0f}uF" for v in kapasitans_degerleri
+        )
+        oneriler.append(DekuplajOnerisi(
+            dugum=dugum,
+            onerilen_kapasitans_f=list(kapasitans_degerleri),
+            maks_mesafe_mm=maks_mesafe_mm,
+            gerekce=(
+                f"{dugum}: ölçülen düşüm {dusum_mv:.1f}mV ({dusum_yuzdesi:.1f}% nominal) — "
+                f"tolerans dışı (kural-of-thumb). Öneri: {deger_metni}, IC güç pininden "
+                f"≤{maks_mesafe_mm}mm (bkz. pcbnew_koprusu.dekuplaj_mesafe_kontrolu ile TUTARLI)."
+            ),
+        ))
+    return oneriler
 
 
 # ------------------------------------------------------------------
