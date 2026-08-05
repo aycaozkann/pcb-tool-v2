@@ -57,6 +57,7 @@ ortamda gerçek `pcbnew` YOKTUR, SENİN makinende doğrulanmalı (bkz.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -167,6 +168,127 @@ def kart_sinir_kutusunu_al(board) -> Optional[SinirKutusu]:
     if not bulundu:
         return None
     return SinirKutusu("EDGE_CUTS", x_min, y_min, x_max, y_max)
+
+
+# ------------------------------------------------------------------
+# 2b. İZ (TRACK) ENGELİ — İKİ AŞAMALI ÇARPIŞMA TESTİ İÇİN
+#     (cm4-io-test'te otonom_python_router.py'nin A*'ı bunu kullanacak)
+# ------------------------------------------------------------------
+#
+# NEDEN BU BÖLÜM VAR (cm4-io-test, 2026-08-05 bulgusu): `otonom_python_
+# router.py::izgara_a_yildiz_ara()` engelleri SADECE AABB (x_min/y_min/
+# x_max/y_max) olarak test ediyordu. 45°'lik köşegen bir iz için bu AABB,
+# izin GERÇEK çizgisinden çok daha büyük bir dikdörtgendir (örn. (48,16.46)
+# -> (31.86,27.275) köşegeninin AABB'si X:[31.86,48] Y:[16.46,27.275] -
+# bu dikdörtgenin köşelerine yakın büyük üçgen alanlar TAMAMEN BOŞ olduğu
+# halde "engelli" sayılıyordu). Gerçek cm4-io-test HDMI0_TX2_P J2->via
+# hop'unda bu YÜZDEN A*'ın hedef/başlangıç noktası "engelli bölgede"
+# yanlış-pozitif verdi, halbuki nokta o köşegen çizgisinden gerçekte
+# >1mm uzaktaydı.
+#
+# İKİ AŞAMALI ÇÖZÜM (broad + narrow phase, klasik çarpışma-motoru deseni):
+#   1. Broad phase: mevcut AABB testi AYNEN korunur (performans için ön
+#      filtre — nokta AABB DIŞINDAYSA gerçek segment hiç hesaplanmaz).
+#   2. Narrow phase: nokta AABB İÇİNDEYSE, engel bir `IzEngeli` (segment)
+#      ise noktanın segmente GERÇEK dik mesafesi ölçülür
+#      (`nokta_segmente_dik_mesafe`); bu mesafe (iz_genişliği/2 +
+#      clearance)'tan BÜYÜKSE nokta güvenlidir (AABB içinde ama çizgiden
+#      yeterince uzak) - yanlış-pozitif İPTAL edilir.
+#   `SinirKutusu` (komponent) engelleri narrow-phase'e GİRMEZ - bir
+#   komponentin gerçek gövdesi zaten o AABB'nin büyük kısmını dolduruyor
+#   kabul edilir (segment değil, katı cisim), bu yüzden mevcut davranış
+#   BOZULMADAN korunur.
+
+def nokta_segmente_dik_mesafe(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """`(px,py)` noktasının `(x1,y1)-(x2,y2)` ÇİZGİ SEGMENTİNE (sonsuz
+    doğruya değil) en kısa dik mesafesi, mm cinsinden. Standart vektör
+    projeksiyon matematiği: en yakın nokta segment dışına düşerse en
+    yakın UCA kenetlenir (clamped). Segment sıfır uzunluklu ise (x1,y1)
+    == (x2,y2), bu bir NOKTA engeli demektir (örn. bir via) - düz nokta-
+    nokta mesafesine düşer, özel durum kodu GEREKMEZ (aşağıdaki formül
+    `uzunluk_kare == 0` durumunu zaten ayrı ele alır)."""
+    dx, dy = x2 - x1, y2 - y1
+    uzunluk_kare = dx * dx + dy * dy
+    if uzunluk_kare < 1e-12:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / uzunluk_kare))
+    yakin_x, yakin_y = x1 + t * dx, y1 + t * dy
+    return math.hypot(px - yakin_x, py - yakin_y)
+
+
+@dataclass
+class IzEngeli:
+    """Bir bakır iz (track) veya via'nın segment-doğru engel temsili.
+
+    `x_min`/`y_min`/`x_max`/`y_max` (broad-phase AABB) `SinirKutusu` ile
+    AYNI arayüzü sağlar - `otonom_python_router.py`'nin mevcut
+    `KutuBenzeri` Protocol'üne (duck-typing) uyar, YENİ bir tip kontrolü
+    GEREKMEZ. Narrow-phase testi bu sınıfın `x1/y1/x2/y2/genislik_mm`
+    alanlarının VARLIĞIYLA (hasattr) tetiklenir - `SinirKutusu`'nun bu
+    alanları YOKTUR, bu yüzden narrow-phase'e hiç girmez (katı cisim
+    olarak kalır, davranış değişmez).
+
+    Via'lar (nokta engeli) `x1==x2, y1==y2` ile temsil edilir -
+    `nokta_segmente_dik_mesafe` bunu otomatik nokta-mesafesine indirger.
+    """
+
+    ref: str
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    genislik_mm: float
+
+    @property
+    def x_min(self) -> float:
+        return min(self.x1, self.x2) - self.genislik_mm / 2.0
+
+    @property
+    def x_max(self) -> float:
+        return max(self.x1, self.x2) + self.genislik_mm / 2.0
+
+    @property
+    def y_min(self) -> float:
+        return min(self.y1, self.y2) - self.genislik_mm / 2.0
+
+    @property
+    def y_max(self) -> float:
+        return max(self.y1, self.y2) + self.genislik_mm / 2.0
+
+
+def iz_engellerini_al(board, haric_net_adi: Optional[str] = None) -> List["IzEngeli"]:
+    """Karttaki HER track/via'yı `IzEngeli` engeli olarak döner -
+    `komponent_sinir_kutularini_al()` ile AYNI duck-typing deseni
+    (`board.GetTracks()`, `pad.Type()`, vb. - `import pcbnew` YAPMAZ,
+    çağıran taraf `pcbnew.PCB_VIA_T` sabitini KENDİSİ karşılaştırıp
+    verir gerekmez; burada `Type()`'ın döndürdüğü değer `board`'un
+    kendi modülünden geldiği için ekstra import gerekmiyor).
+
+    `haric_net_adi` verilirse o net'in KENDİ track/via'ları engel
+    listesine ALINMAZ (henüz routelanmamış/routelanmakta olan net'in
+    kendi geçmiş denemelerini kendine engel saymaması için) - `None`
+    ise (varsayılan) TÜM net'ler dahil edilir.
+    """
+    import pcbnew  # lazy - MASTER_RULEBOOK "pcbnew Bağımlılığı Her Zaman Lazy"
+
+    NM = NM_PER_MM
+    engeller: List[IzEngeli] = []
+    for t in board.GetTracks():
+        net_adi = t.GetNetname()
+        if haric_net_adi is not None and net_adi == haric_net_adi:
+            continue
+        if t.Type() == pcbnew.PCB_VIA_T:
+            pos = t.GetPosition()
+            x, y = pos.x / NM, pos.y / NM
+            genislik = t.GetWidth(pcbnew.F_Cu) / NM  # bkz. PCB_VIA::GetWidth katman argümanı notu
+            engeller.append(IzEngeli(f"via_{net_adi}", x, y, x, y, genislik))
+        else:
+            s, e = t.GetStart(), t.GetEnd()
+            genislik = t.GetWidth() / NM
+            engeller.append(IzEngeli(
+                f"trk_{net_adi}", s.x / NM, s.y / NM, e.x / NM, e.y / NM, genislik,
+            ))
+    return engeller
 
 
 # ------------------------------------------------------------------

@@ -17,8 +17,10 @@ from otonom_python_router import (
     AramaSonucu,
     izgara_a_yildiz_ara,
     oz_testleri_calistir,
+    _hucre_engelli_mi,
     _yolu_sadelestir,
 )
+from pcb_carpisma_radari import IzEngeli
 
 
 @dataclass
@@ -85,3 +87,40 @@ class TestYoluSadelestir:
 def test_oz_testleri_temiz():
     hatalar = oz_testleri_calistir()
     assert hatalar == [], f"öz-testler kırıldı: {hatalar}"
+
+
+# ------------------------------------------------------------------
+# İki aşamalı çarpışma testi (2026-08-05, cm4-io-test bulgusu): 45°
+# köşegen bir `IzEngeli`nin AABB'si gerçek çizgiden çok daha büyük -
+# narrow-phase bu farkı point-segment mesafesiyle kapatmalı.
+# ------------------------------------------------------------------
+
+class TestIkiAsamaliCarpismaTesti:
+    def test_koseginin_aabb_kosesindeki_bos_alan_artik_engelli_sayilmiyor(self):
+        """REGRESYON TESTİ (cm4-io-test HDMI0_TX2_P J2->via hop'u): bir
+        köşegen `IzEngeli`nin AABB köşesine yakın ama GERÇEK çizgiden çok
+        uzak bir nokta, eski (AABB-only) davranışta yanlış-pozitif
+        "engelli" verirdi - narrow-phase bunu düzeltmeli.
+
+        Çizgi: (0,10)->(20,0), denklemi x+2y=20. AABB: X:[0,20] Y:[0,10].
+        (0,0) köşesine yakın bir nokta (0.5,0.5): çizgiye dik mesafe
+        |0.5+1-20|/sqrt(5)=8.27mm - AABB İÇİNDE ama çizgiden ÇOK uzak."""
+        koseg = IzEngeli("trk_TEST", 0.0, 10.0, 20.0, 0.0, genislik_mm=0.29)
+        assert not _hucre_engelli_mi((2, 2), [koseg], hucre_mm=0.25, clearance_mm=0.15)
+
+    def test_koseginin_uzerindeki_hucre_hala_engelli_kabul_edilir(self):
+        """Narrow-phase sadece yanlış-pozitifleri iptal eder - gerçekten
+        çizginin ÜZERİNDEKİ bir hücre hâlâ engelli kalmalı (gevşetme
+        değil, düzeltme). `_hucre_engelli_mi` doğrudan test edilir -
+        tam yol aramasının "aynı hücre kısayolu" davranışına takılmadan."""
+        koseg = IzEngeli("trk_TEST", 0.0, 0.0, 20.0, 20.0, genislik_mm=0.29)
+        # (10,10) tam köşegenin üzerinde -> hücre karşılığı kesinlikle engelli.
+        assert _hucre_engelli_mi((40, 40), [koseg], hucre_mm=0.25, clearance_mm=0.15)
+
+    def test_sinirkutusu_engelleri_narrow_phase_e_girmez_eski_davranis_korunur(self):
+        """`SinirKutusu` (komponent) engelleri `x1/genislik_mm` alanlarına
+        SAHİP DEĞİL - narrow-phase hiç tetiklenmemeli, davranış AABB-only
+        eski haliyle BİREBİR aynı kalmalı (regresyon güvencesi)."""
+        kapali = Kutu(-1.0, -1.0, 1.0, 1.0)
+        s = izgara_a_yildiz_ara((0.0, 0.0), (10.0, 0.0), [kapali], hucre_mm=0.5, clearance_mm=0.1)
+        assert not s.bulundu_mu  # SinirKutusu hâlâ katı cisim gibi davranıyor

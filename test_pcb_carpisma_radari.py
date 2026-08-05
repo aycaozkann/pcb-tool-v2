@@ -16,6 +16,7 @@ import pytest
 from bulgu_sozlesmesi import BulguDurumu
 
 from pcb_carpisma_radari import (
+    IzEngeli,
     SinirKutusu,
     carpisan_ciftleri_bul,
     carpisma_radari_tara,
@@ -23,6 +24,7 @@ from pcb_carpisma_radari import (
     kart_sinir_kutusunu_al,
     komponent_sinir_kutularini_al,
     kutular_carpisiyor_mu,
+    nokta_segmente_dik_mesafe,
     oz_testleri_calistir,
 )
 
@@ -253,3 +255,51 @@ def test_kart_sinir_kutusunu_al_pcbnew_gerektirir():
     board = SahteBoard([])
     with pytest.raises(ImportError):
         kart_sinir_kutusunu_al(board)
+
+
+# ------------------------------------------------------------------
+# 8. nokta_segmente_dik_mesafe / IzEngeli — iki aşamalı çarpışma testi
+#    (cm4-io-test, 2026-08-05: köşegen izlerin AABB'si gerçek çizgiden
+#    çok daha büyük olup boş üçgen alanları yanlışlıkla engelli sayıyordu)
+# ------------------------------------------------------------------
+
+def test_nokta_segmente_mesafe_dik_izdusum():
+    """Nokta, segmentin ORTASINA dik düşüyorsa mesafe basit dik uzaklık."""
+    mesafe = nokta_segmente_dik_mesafe(5.0, 3.0, 0.0, 0.0, 10.0, 0.0)
+    assert mesafe == pytest.approx(3.0)
+
+
+def test_nokta_segmente_mesafe_uc_noktaya_kenetlenir():
+    """Nokta, segmentin izdüşüm aralığının DIŞINDAYSA en yakın UCA mesafe
+    döner (dik izdüşüm değil, sonsuz doğru mesafesi DEĞİL)."""
+    mesafe = nokta_segmente_dik_mesafe(-3.0, 4.0, 0.0, 0.0, 10.0, 0.0)
+    assert mesafe == pytest.approx(5.0)  # (-3,4) -> (0,0) uzaklığı
+
+
+def test_nokta_segmente_mesafe_sifir_uzunluklu_segment_nokta_mesafesi():
+    """Sıfır uzunluklu segment (via temsili, x1==x2,y1==y2) düz nokta-nokta
+    mesafesine düşer."""
+    mesafe = nokta_segmente_dik_mesafe(3.0, 4.0, 0.0, 0.0, 0.0, 0.0)
+    assert mesafe == pytest.approx(5.0)
+
+
+def test_izengeli_aabb_koseginin_gercek_cizgisinden_cok_daha_buyuk():
+    """cm4-io-test'in gerçek bulgusu: 45° köşegen bir izin AABB'si, izin
+    KENDİSİNDEN çok daha büyük bir alanı kapsar - narrow-phase bu farkı
+    gerçek dik mesafeyle KAPATMALI (AABB içinde ama çizgiden uzak bir
+    nokta narrow-phase'te güvenli çıkmalı)."""
+    iz = IzEngeli("trk_TEST", 0.0, 0.0, 10.0, 10.0, genislik_mm=0.2)
+    # AABB köşesine yakın bir nokta (0.5, 9.5) - AABB İÇİNDE ama gerçek
+    # köşegen çizgisinden ÇOK uzak.
+    assert 0.0 <= 0.5 <= iz.x_max and 0.0 <= 9.5 <= iz.y_max  # AABB içinde, doğrulama
+    mesafe = nokta_segmente_dik_mesafe(0.5, 9.5, iz.x1, iz.y1, iz.x2, iz.y2)
+    assert mesafe > iz.genislik_mm / 2.0 + 0.2  # gerçek engel sınırından çok uzak
+
+
+def test_izengeli_gercekten_cizgi_uzerindeki_nokta_engelli_kalir():
+    """Aynı köşegenin gerçek ÜZERİNDEKİ (veya çok yakınındaki) bir nokta
+    hâlâ engelli sayılmalı - narrow-phase sadece yanlış-pozitifleri
+    iptal eder, gerçek engelleri KAÇIRMAZ."""
+    iz = IzEngeli("trk_TEST", 0.0, 0.0, 10.0, 10.0, genislik_mm=0.2)
+    mesafe = nokta_segmente_dik_mesafe(5.0, 5.0, iz.x1, iz.y1, iz.x2, iz.y2)
+    assert mesafe < 0.01  # tam çizgi üzerinde

@@ -54,6 +54,12 @@ import math
 from dataclasses import dataclass
 from typing import List, Optional, Protocol, Sequence, Tuple
 
+# Sadece geometri fonksiyonu - pcb_carpisma_radari modülü de `import pcbnew`
+# YAPMAZ (kendi lazy-import kuralına uyar), bu yüzden bu modülün başlıktaki
+# "pcbnew GEREKMEZ" iddiası bozulmuyor. Narrow-phase çarpışma testi (bkz.
+# `_hucre_engelli_mi`) için kullanılır.
+from pcb_carpisma_radari import nokta_segmente_dik_mesafe
+
 Nokta = Tuple[float, float]
 IzgaraHucresi = Tuple[int, int]
 
@@ -88,11 +94,33 @@ def _noktaya_cevir(hucre: IzgaraHucresi, hucre_mm: float) -> Nokta:
 def _hucre_engelli_mi(
     hucre: IzgaraHucresi, engeller: Sequence[KutuBenzeri], hucre_mm: float, clearance_mm: float,
 ) -> bool:
+    """İKİ AŞAMALI çarpışma testi (2026-08-05, cm4-io-test bulgusu):
+
+    1. Broad phase (mevcut davranış, AYNEN korunur): nokta engelin AABB'si
+       dışındaysa hemen sıradaki engele geç - ucuz, hızlı ön filtre.
+    2. Narrow phase: nokta AABB İÇİNDEYSE VE engel bir `IzEngeli` (segment)
+       ise (`pcb_carpisma_radari.IzEngeli` - `x1/y1/x2/y2/genislik_mm`
+       alanlarının VARLIĞIYLA `hasattr` ile tespit edilir, yeni bir tip
+       importu/izinstance kontrolü GEREKMEZ), noktanın segmente GERÇEK
+       dik mesafesi ölçülür. Bu mesafe (iz_genişliği/2 + clearance)'tan
+       büyükse nokta GÜVENLİDİR - 45° köşegen izlerin AABB'sinin köşelere
+       yakın boş üçgen alanlarını yanlışlıkla "dolu" saymanın önüne geçer
+       (bkz. `pcb_carpisma_radari.py` İZ ENGELİ bölümünün başlık notu).
+       `SinirKutusu` (komponent) engelleri bu alanlara SAHİP DEĞİLDİR,
+       dolayısıyla narrow-phase'e hiç girmez - katı cisim olarak kalır,
+       ESKİ davranış (saf AABB) bu tip engeller için BİREBİR korunur.
+    """
     x, y = _noktaya_cevir(hucre, hucre_mm)
     for e in engeller:
-        if (e.x_min - clearance_mm) <= x <= (e.x_max + clearance_mm) and \
-           (e.y_min - clearance_mm) <= y <= (e.y_max + clearance_mm):
-            return True
+        if not ((e.x_min - clearance_mm) <= x <= (e.x_max + clearance_mm) and
+                (e.y_min - clearance_mm) <= y <= (e.y_max + clearance_mm)):
+            continue  # broad phase: AABB dışında -> bu engel temiz
+        if hasattr(e, "x1") and hasattr(e, "genislik_mm"):
+            mesafe = nokta_segmente_dik_mesafe(x, y, e.x1, e.y1, e.x2, e.y2)
+            sinir = e.genislik_mm / 2.0 + clearance_mm
+            if mesafe > sinir:
+                continue  # narrow phase: AABB içindeydi ama gerçek çizgiden yeterince uzak
+        return True
     return False
 
 
