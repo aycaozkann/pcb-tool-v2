@@ -7,11 +7,14 @@ import pytest
 
 from pcb_stackup_planner import TermalYonetim
 
+from bulgu_sozlesmesi import BulguDurumu
+
 from ecad_mcad_termal_kopru import (
     TermalTemasBolgesi,
     soguturucu_yuzey_bul,
     KomponentTermalDurumu,
     termal_yonetim_ve_mask_kontrolu,
+    termal_mekanik_taramasi_calistir,
     b_mask_poligonu_pcb_ye_yaz,
     termal_ped_kalinligi_hesapla,
     termal_ped_bom_notu_uret,
@@ -22,6 +25,9 @@ from ecad_mcad_termal_kopru import (
     edge_cuts_yarigi_oner,
     termal_bariyer_ozetle,
     edge_cuts_yarigi_pcb_ye_yaz,
+    JunctionSicakligiGirdisi,
+    junction_sicakligi_hesapla_c,
+    junction_sicakligi_kontrolu,
 )
 
 
@@ -113,6 +119,54 @@ def test_mask_kontrolu_mevcut_via_kontrolunu_de_tasir():
     )
     bulgular = termal_yonetim_ve_mask_kontrolu(durum, [KARE_YUZEY], kritik_guc_esigi_W=0.5)
     assert any("TERMAL YÖNETİM HATASI" in b and "termal via gerekir" in b for b in bulgular)
+
+
+# ------------------------------------------------------------------
+# 2b. termal_mekanik_taramasi_calistir (bulgu_sozlesmesi entegrasyonu)
+# ------------------------------------------------------------------
+
+def test_tarama_komponent_yoksa_kapsam_yok_doner():
+    bulgu = termal_mekanik_taramasi_calistir([], [KARE_YUZEY])
+    assert bulgu.durum == BulguDurumu.KAPSAM_YOK
+    assert bulgu.taranan == 0
+    assert bulgu.ihlaller == []
+
+
+def test_tarama_temiz_komponentlerle_pass_doner():
+    durum = KomponentTermalDurumu(
+        yonetim=_yonetim(1.0), x=5, y=5, b_mask_acikligi_tanimli_mi=True,
+        yuzey_kaplamasi="ENIG",
+    )
+    bulgu = termal_mekanik_taramasi_calistir([durum], [KARE_YUZEY])
+    assert bulgu.durum == BulguDurumu.PASS
+    assert bulgu.taranan == 1
+    assert bulgu.ihlaller == []
+
+
+def test_tarama_ihlalli_komponentle_fail_doner_ve_isim_tasir():
+    durum = KomponentTermalDurumu(
+        yonetim=_yonetim(1.0), x=5, y=5, b_mask_acikligi_tanimli_mi=False,
+    )
+    bulgu = termal_mekanik_taramasi_calistir([durum], [KARE_YUZEY])
+    assert bulgu.durum == BulguDurumu.FAIL
+    assert bulgu.taranan == 1
+    assert len(bulgu.ihlaller) == 1
+    assert bulgu.ihlaller[0]["komponent"] == durum.yonetim.isim
+    assert "B.Mask açıklığı tanımlı değil" in bulgu.ihlaller[0]["mesaj"]
+
+
+def test_tarama_birden_fazla_komponent_karisik_sonuc():
+    temiz = KomponentTermalDurumu(
+        yonetim=_yonetim(1.0, via=99), x=5, y=5, b_mask_acikligi_tanimli_mi=True,
+        yuzey_kaplamasi="ENIG",
+    )
+    hatali = KomponentTermalDurumu(
+        yonetim=_yonetim(1.0), x=5, y=5, b_mask_acikligi_tanimli_mi=False,
+    )
+    bulgu = termal_mekanik_taramasi_calistir([temiz, hatali], [KARE_YUZEY])
+    assert bulgu.durum == BulguDurumu.FAIL
+    assert bulgu.taranan == 2
+    assert len(bulgu.ihlaller) == 1
 
 
 # ------------------------------------------------------------------
@@ -278,3 +332,84 @@ def test_edge_cuts_yarigi_pcb_ye_yaz_dosya_yoksa_hata_firlatir(tmp_path):
     yarik = FrezelemeYarigi("x", (0, 0), (1, 1), 1.0, 4.0)
     with pytest.raises(FileNotFoundError):
         edge_cuts_yarigi_pcb_ye_yaz(str(tmp_path / "yok.kicad_pcb"), yarik)
+
+
+# ------------------------------------------------------------------
+# FAZ 0.5-4: junction_sicakligi_hesapla_c / junction_sicakligi_kontrolu
+# ------------------------------------------------------------------
+
+def test_rtheta_verisi_yoksa_hesaplanamaz_ve_kapsam_yok():
+    """Datasheet Rθ verisi olmadan bir sayı UYDURULMAZ."""
+    girdi = JunctionSicakligiGirdisi(isim="U1", guc_W=1.0)
+    tj, sebep = junction_sicakligi_hesapla_c(girdi)
+    assert tj is None
+    assert "UYDURULAMAZ" in sebep
+
+    bulgu = junction_sicakligi_kontrolu(girdi)
+    assert bulgu.durum == BulguDurumu.KAPSAM_YOK
+    assert bulgu.taranan == 0
+
+
+def test_rtheta_ja_ile_basit_hesap():
+    """Tj = Ta + P*RθJA — ders kitabı örneği: 25 + 1.0*40 = 65°C."""
+    girdi = JunctionSicakligiGirdisi(
+        isim="U2_LDO", guc_W=1.0, r_theta_ja_c_per_w=40.0, ortam_sicakligi_c=25.0,
+    )
+    tj, yontem = junction_sicakligi_hesapla_c(girdi)
+    assert tj == pytest.approx(65.0)
+    assert "RθJA" in yontem
+
+
+def test_kasa_temasi_varsa_rtheta_jc_yolu_tercih_edilir():
+    """RθJC + kasa temas sıcaklığı İKİSİ de verilmişse, RθJA verilmiş olsa
+    BİLE kasa-temaslı yol TERCİH EDİLİR (gerçek referans nokta kasadır)."""
+    girdi = JunctionSicakligiGirdisi(
+        isim="U3_MOSFET", guc_W=2.0,
+        r_theta_ja_c_per_w=40.0,       # verilse bile kullanılmamalı
+        r_theta_jc_c_per_w=5.0,
+        kasa_temas_sicakligi_c=45.0,   # ölçülen/verilen kasa sıcaklığı
+        ortam_sicakligi_c=25.0,
+    )
+    tj, yontem = junction_sicakligi_hesapla_c(girdi)
+    assert tj == pytest.approx(45.0 + 2.0 * 5.0)  # 55°C, RθJA yolunun 105°C'siyle KARIŞTIRILMAMALI
+    assert "RθJC" in yontem
+
+
+def test_maks_tj_verilmezse_pass_fail_karari_verilmez_kapsam_yok():
+    """Tj hesaplanabilir ama sınır (Tj_max) yoksa PASS/FAIL UYDURULMAZ —
+    hesaplanan değer yine de `detay`'da RAPORLANIR (25 + 0.5*60 = 55.0)."""
+    girdi = JunctionSicakligiGirdisi(isim="U4", guc_W=0.5, r_theta_ja_c_per_w=60.0)
+    bulgu = junction_sicakligi_kontrolu(girdi)
+    assert bulgu.durum == BulguDurumu.KAPSAM_YOK
+    assert "55.0" in bulgu.detay
+
+
+def test_tj_sinirin_altindaysa_pass():
+    girdi = JunctionSicakligiGirdisi(
+        isim="U5", guc_W=1.0, r_theta_ja_c_per_w=30.0, ortam_sicakligi_c=25.0,
+        maks_izin_verilen_tj_c=125.0,
+    )
+    bulgu = junction_sicakligi_kontrolu(girdi)
+    assert bulgu.durum == BulguDurumu.PASS
+
+
+def test_tj_siniri_asarsa_fail_ve_ihlal_detayli_raporlanir():
+    girdi = JunctionSicakligiGirdisi(
+        isim="U6_ASIRI_ISINAN", guc_W=3.0, r_theta_ja_c_per_w=40.0, ortam_sicakligi_c=25.0,
+        maks_izin_verilen_tj_c=125.0,  # Tj = 25 + 3*40 = 145 > 125
+    )
+    bulgu = junction_sicakligi_kontrolu(girdi)
+    assert bulgu.durum == BulguDurumu.FAIL
+    assert bulgu.ihlaller[0]["isim"] == "U6_ASIRI_ISINAN"
+    assert bulgu.ihlaller[0]["tj_c"] == pytest.approx(145.0)
+
+
+def test_fault_injection_yanlis_esik_gercekten_fail_uretir():
+    """Fault-injection: kasıtlı olarak düşük bir Tj_max verip testin
+    GERÇEKTEN bir şey kontrol ettiğini kanıtlar (projenin genel deseni)."""
+    girdi = JunctionSicakligiGirdisi(
+        isim="U7", guc_W=0.1, r_theta_ja_c_per_w=10.0, ortam_sicakligi_c=25.0,
+        maks_izin_verilen_tj_c=1.0,  # bilerek imkansız derecede düşük
+    )
+    bulgu = junction_sicakligi_kontrolu(girdi)
+    assert bulgu.durum == BulguDurumu.FAIL

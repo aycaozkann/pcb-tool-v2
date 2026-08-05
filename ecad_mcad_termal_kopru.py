@@ -47,8 +47,9 @@ import shutil
 import uuid as uuid_lib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from bulgu_sozlesmesi import Bulgu, bulgu_uret
 from pcb_stackup_planner import TermalYonetim, termal_yonetim_kontrolu
 
 
@@ -175,6 +176,33 @@ def termal_yonetim_ve_mask_kontrolu(
     return hatalar
 
 
+def termal_mekanik_taramasi_calistir(
+    komponentler: List[KomponentTermalDurumu],
+    yuzeyler: List[TermalTemasBolgesi],
+    kritik_guc_esigi_W: float = 0.5,
+) -> Bulgu:
+    """`termal_yonetim_ve_mask_kontrolu()`'nu proje genelindeki komponent
+    listesine uygulayıp tek bir `bulgu_sozlesmesi.Bulgu` üretir — bu, modülün
+    orkestrasyona (`main.py`) bağlanabilmesi için gereken TEK giriş noktasıdır.
+
+    `komponentler` boşsa (proje termal/mekanik veri paylaşmamışsa)
+    `taranan=0` -> otomatik `KAPSAM_YOK` (bkz. `bulgu_uret`); bu, modülün
+    "kasa verisi yoksa sessizce devre dışı kal" disiplinini KAPSAM_YOK
+    raporuna çevirir — artık sessiz değil, açıkça "kontrol edilmedi"
+    olarak görünür.
+    """
+    ihlaller: List[Dict[str, Any]] = []
+    for durum in komponentler:
+        for mesaj in termal_yonetim_ve_mask_kontrolu(durum, yuzeyler, kritik_guc_esigi_W):
+            ihlaller.append({"komponent": durum.yonetim.isim, "mesaj": mesaj})
+    return bulgu_uret(
+        "termal_mekanik_entegrasyonu",
+        taranan=len(komponentler),
+        ihlaller=ihlaller,
+        detay=f"{len(komponentler)} komponent, {len(yuzeyler)} kasa temas yüzeyine karşı tarandı.",
+    )
+
+
 def b_mask_poligonu_pcb_ye_yaz(
     board_path: str,
     komponent_isim: str,
@@ -260,6 +288,96 @@ def termal_ped_bom_notu_uret(isim: str, kalinlik_mm: float) -> str:
     EKLEMEZ (döngüsel import riski), sadece formatı üretir.
     """
     return f"Thermal Pad — {kalinlik_mm}mm ({isim})"
+
+
+# ------------------------------------------------------------------
+# 3b. JUNCTION SICAKLIĞI — RθJA/RθJC TABANLI İLK YAKLAŞIM (FAZ 0.5-4)
+# ------------------------------------------------------------------
+#
+# DÜRÜSTLÜK SINIRI (görev tanımından BİREBİR): bu bölüm TAM bir parazitik
+# ısıl model veya EM/termal çözücü DEĞİLDİR — sadece datasheet'te verilen
+# RθJA/RθJC değerleriyle birinci-derece (steady-state, tek-düğümlü)
+# Tj = T_referans + P × Rθ hesabı yapar. Çoklu katmanlı ısıl direnç ağı,
+# geçici (transient) ısınma eğrisi, komşu komponentlerin ısıl etkileşimi
+# BU HESABIN DIŞINDADIR — kritik/sınırda çıkan bir sonuç için gerçek bir
+# termal simülasyon (ör. FEA) hâlâ gereklidir, bu fonksiyon sadece "erken
+# uyarı" seviyesindedir.
+
+@dataclass
+class JunctionSicakligiGirdisi:
+    """Bir komponentin ısıl birinci-yaklaşım hesabı için GEREKEN veri.
+
+    `r_theta_ja_c_per_w`/`r_theta_jc_c_per_w` datasheet'ten gelir — burada
+    UYDURULMAZ; ikisi de `None` ise hesap yapılamaz (`KAPSAM_YOK`).
+    `kasa_temas_sicakligi_c`, `soguturucu_yuzey_bul()`'un bulduğu bir
+    `TermalTemasBolgesi`'nin GERÇEK ölçülen/simüle edilmiş sıcaklığıdır
+    (bu modül onu ÜRETMEZ, sadece TÜKETİR) — verilmezse RθJA/ortam yoluna
+    düşülür.
+    """
+
+    isim: str
+    guc_W: float
+    r_theta_ja_c_per_w: Optional[float] = None
+    r_theta_jc_c_per_w: Optional[float] = None
+    ortam_sicakligi_c: float = 25.0
+    kasa_temas_sicakligi_c: Optional[float] = None
+    maks_izin_verilen_tj_c: Optional[float] = None  # datasheet Tj(max) — genelde 125°C tipik ama UYDURULMAZ
+
+
+def junction_sicakligi_hesapla_c(girdi: JunctionSicakligiGirdisi) -> Tuple[Optional[float], str]:
+    """`(Tj_derece_C, yontem_aciklamasi)` döner; Rθ verisi YOKSA `(None, sebep)`.
+
+    Kasa temas sıcaklığı VE RθJC'nin İKİSİ de verilmişse bu yol TERCİH
+    EDİLİR (kasaya ısıl temas kuran bir komponentte gerçek referans nokta
+    kasadır, ortam havası DEĞİL — `termal_yonetim_ve_mask_kontrolu()`'nun
+    aynı varsayımıyla tutarlı). Aksi halde RθJA + ortam sıcaklığına düşülür.
+    """
+    if girdi.kasa_temas_sicakligi_c is not None and girdi.r_theta_jc_c_per_w is not None:
+        tj = girdi.kasa_temas_sicakligi_c + girdi.guc_W * girdi.r_theta_jc_c_per_w
+        return tj, f"RθJC={girdi.r_theta_jc_c_per_w}°C/W, kasa_temas_sicakligi={girdi.kasa_temas_sicakligi_c}°C"
+    if girdi.r_theta_ja_c_per_w is not None:
+        tj = girdi.ortam_sicakligi_c + girdi.guc_W * girdi.r_theta_ja_c_per_w
+        return tj, f"RθJA={girdi.r_theta_ja_c_per_w}°C/W, ortam_sicakligi={girdi.ortam_sicakligi_c}°C"
+    return None, "datasheet RθJA/RθJC değeri verilmedi — Tj UYDURULAMAZ"
+
+
+def junction_sicakligi_kontrolu(girdi: JunctionSicakligiGirdisi) -> Bulgu:
+    """`junction_sicakligi_hesapla_c()`'yi `bulgu_sozlesmesi.Bulgu` ile sarar.
+
+    `girdi.maks_izin_verilen_tj_c` verilmemişse (datasheet Tj(max) elde
+    değilse) hesaplanan Tj yine `detay`'da RAPORLANIR ama PASS/FAIL kararı
+    verilmez — sınırsız bir "geçti" iddiası UYDURULMAZ, `KAPSAM_YOK` döner.
+    """
+    kontrol = "junction_sicakligi_ilk_yaklasim"
+    tj, yontem = junction_sicakligi_hesapla_c(girdi)
+    if tj is None:
+        return bulgu_uret(kontrol, taranan=0, detay=f"{girdi.isim}: {yontem}.")
+
+    if girdi.maks_izin_verilen_tj_c is None:
+        return bulgu_uret(
+            kontrol, taranan=0,
+            detay=(
+                f"{girdi.isim}: Tj≈{tj:.1f}°C ({yontem}) hesaplandı ama datasheet Tj(max) "
+                f"verilmediği için PASS/FAIL kararı verilemiyor (KAPSAM_YOK — sınır uydurulmadı)."
+            ),
+        )
+
+    ihlaller: List[Dict[str, Any]] = []
+    if tj > girdi.maks_izin_verilen_tj_c:
+        ihlaller.append({
+            "isim": girdi.isim,
+            "tj_c": round(tj, 2),
+            "maks_izin_verilen_tj_c": girdi.maks_izin_verilen_tj_c,
+            "yontem": yontem,
+        })
+
+    return bulgu_uret(
+        kontrol, taranan=1, ihlaller=ihlaller,
+        detay=(
+            f"{girdi.isim}: Tj≈{tj:.1f}°C ({yontem}), sınır={girdi.maks_izin_verilen_tj_c}°C. "
+            "NOT: birinci-derece ilk yaklaşım — tam parazitik/EM ısıl çözücü DEĞİLDİR."
+        ),
+    )
 
 
 # ------------------------------------------------------------------
