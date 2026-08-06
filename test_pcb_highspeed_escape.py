@@ -21,6 +21,11 @@ from pcb_highspeed_escape import (
     meander_gerekli_mi,
     meander_ekleme_mesafesi_hesapla_mm,
     gnd_dolgu_min_clearance_mm,
+    KartYolSegmenti,
+    coklu_kart_skew_butcesi_hesapla,
+    FR4_MIKROSERIT_HIZ_MM_NS,
+    VARSAYILAN_KABLO_HIZ_MM_NS,
+    VARSAYILAN_VIA_GECIS_GECIKMESI_PS,
 )
 
 
@@ -168,3 +173,83 @@ def test_90_derece_kose_fault_injection_once_temiz_sonra_ihlal():
     b_bozuk = RotaSegmenti(10, 0, 10, 10)
     kotu = dik_acili_koseleri_bul([a, b_bozuk])
     assert kotu == [0], "FAIL: enjekte edilen 90 derece köşe yakalanmadı"
+
+
+# ------------------------------------------------------------------
+# FAZ 0.5 #35 — coklu_kart_skew_butcesi_hesapla()
+# ------------------------------------------------------------------
+
+def test_bos_yol_listesi_reddedilir():
+    with pytest.raises(ValueError):
+        coklu_kart_skew_butcesi_hesapla([], butce_ps=1000.0)
+
+
+def test_tek_kart_skew_sifir():
+    yollar = [KartYolSegmenti("cam0", host_pcb_uzunluk_mm=20.0, kart_pcb_uzunluk_mm=10.0)]
+    sonuc = coklu_kart_skew_butcesi_hesapla(yollar, butce_ps=1000.0)
+    assert sonuc.maks_skew_ps == 0.0
+    assert sonuc.en_hizli_kart == sonuc.en_yavas_kart == "cam0"
+    assert sonuc.butce_asildi_mi is False
+
+
+def test_esit_uzunluklu_kartlar_sifir_skew():
+    # 6 kamera, HEPSİ birebir aynı host-PCB + kablo + kart-PCB + via sayısı
+    yollar = [
+        KartYolSegmenti(f"cam{i}", host_pcb_uzunluk_mm=15.0, kablo_uzunluk_mm=50.0,
+                         kart_pcb_uzunluk_mm=8.0, katman_gecis_sayisi=1)
+        for i in range(6)
+    ]
+    sonuc = coklu_kart_skew_butcesi_hesapla(yollar, butce_ps=100.0)
+    assert sonuc.maks_skew_ps == 0.0
+    assert sonuc.butce_asildi_mi is False
+    assert len(sonuc.kart_sonuclari) == 6
+
+
+def test_farkli_kablo_uzunlugu_skew_uretir_ve_bileşenlere_dogru_dagilir():
+    kisa = KartYolSegmenti("cam_yakin", host_pcb_uzunluk_mm=10.0, kablo_uzunluk_mm=50.0,
+                            kart_pcb_uzunluk_mm=5.0, katman_gecis_sayisi=0)
+    uzun = KartYolSegmenti("cam_uzak", host_pcb_uzunluk_mm=10.0, kablo_uzunluk_mm=250.0,
+                            kart_pcb_uzunluk_mm=5.0, katman_gecis_sayisi=0)
+
+    sonuc = coklu_kart_skew_butcesi_hesapla([kisa, uzun], butce_ps=50.0)
+
+    beklenen_pcb_ps = skew_mm_den_ps_e_cevir(15.0)  # host+kart PCB, ikisinde de aynı
+    beklenen_kablo_fark_ps = (
+        skew_mm_den_ps_e_cevir(250.0, VARSAYILAN_KABLO_HIZ_MM_NS)
+        - skew_mm_den_ps_e_cevir(50.0, VARSAYILAN_KABLO_HIZ_MM_NS)
+    )
+    assert sonuc.kart_sonuclari["cam_yakin"].pcb_gecikme_ps == pytest.approx(beklenen_pcb_ps, abs=1e-3)
+    assert sonuc.en_yavas_kart == "cam_uzak"
+    assert sonuc.en_hizli_kart == "cam_yakin"
+    assert sonuc.maks_skew_ps == pytest.approx(beklenen_kablo_fark_ps, abs=1e-3)
+    assert sonuc.butce_asildi_mi is True  # 50ps bütçe, kablo farkı tek başına çok daha büyük
+
+
+def test_katman_gecisi_via_gecikmesi_ekler():
+    via_yok = KartYolSegmenti("a", host_pcb_uzunluk_mm=10.0, katman_gecis_sayisi=0)
+    via_var = KartYolSegmenti("b", host_pcb_uzunluk_mm=10.0, katman_gecis_sayisi=3)
+
+    sonuc = coklu_kart_skew_butcesi_hesapla([via_yok, via_var], butce_ps=1e6)
+
+    assert sonuc.kart_sonuclari["b"].via_gecikme_ps == pytest.approx(
+        3 * VARSAYILAN_VIA_GECIS_GECIKMESI_PS, abs=1e-6
+    )
+    assert sonuc.kart_sonuclari["a"].via_gecikme_ps == 0.0
+    assert sonuc.maks_skew_ps == pytest.approx(3 * VARSAYILAN_VIA_GECIS_GECIKMESI_PS, abs=1e-3)
+
+
+def test_butce_asilmadiginda_false_doner():
+    yollar = [
+        KartYolSegmenti("a", host_pcb_uzunluk_mm=10.0),
+        KartYolSegmenti("b", host_pcb_uzunluk_mm=10.5),
+    ]
+    sonuc = coklu_kart_skew_butcesi_hesapla(yollar, butce_ps=1000.0)
+    assert sonuc.butce_asildi_mi is False
+
+
+def test_ozel_hiz_parametreleri_kullanilir():
+    yol = KartYolSegmenti("a", host_pcb_uzunluk_mm=0.0, kablo_uzunluk_mm=100.0)
+    varsayilan = coklu_kart_skew_butcesi_hesapla([yol], butce_ps=1e6)
+    ozel_hiz = coklu_kart_skew_butcesi_hesapla([yol], butce_ps=1e6, kablo_hiz_mm_ns=100.0)
+    # Daha DÜŞÜK kablo hızı -> AYNI mesafe için DAHA BÜYÜK gecikme
+    assert ozel_hiz.kart_sonuclari["a"].kablo_gecikme_ps > varsayilan.kart_sonuclari["a"].kablo_gecikme_ps

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 
 # ------------------------------------------------------------------
@@ -437,3 +437,120 @@ def escape_raporu_olustur(deger: EscapeDegerlendirmesi) -> List[str]:
             )
 
     return bulgular
+
+
+# ------------------------------------------------------------------
+# 7. ÇOKLU KART (HOST -> N KAMERA) TOPLAM SKEW BÜTÇESİ (FAZ 0.5 #35)
+# ------------------------------------------------------------------
+# `skew_mm_den_ps_e_cevir()`/`meander_gerekli_mi()` (Bölüm 4) TEK bir net'in
+# P/N çifti içi skew'ini ölçer. Kafa bandı sisteminde asıl soru FARKLI:
+# HOST'tan 6 AYRI kamera kartına giden clock/trigger hatlarının TOPLAM
+# gecikmesi (PCB izi + host<->kart kablosu + katman geçişleri) birbirinden
+# ne kadar SAPIYOR — kartlar arası bu fark (skew) senkron örnekleme
+# bütçesini aşarsa kameralar arasında görüntü zaman damgası kayması olur.
+
+# Tipik ekranlı diferansiyel kablo (ör. koaksiyel çift/FPC uzatma) için
+# efektif hız — FR4 mikroşeritten FARKLI dielektrik/ortam, ayrı bir sabit.
+# Bu sadece "gerçek kablo verisi yoksa" kullanılacak bir VARSAYILANDIR;
+# gerçek tasarımda kablonun kendi datasheet'inden alınan hız kullanılmalı.
+VARSAYILAN_KABLO_HIZ_MM_NS = 200.0
+
+# Bir via'nın katman geçişinde eklediği TİPİK ek gecikme (barrel boyu +
+# stub etkisinin kaba bir toplamı) — GERÇEK bir alan çözümü/simülasyon
+# DEĞİLDİR (bkz. `yerlesim_skoru()`'nun termal skoru ile AYNI disiplin
+# notu: bu sadece "ne kadar riskli" kaba bir tahmindir, ileride
+# `pcb_stackup_planner`'ın gerçek stackup kalınlığıyla hassaslaştırılabilir,
+# şu an İÇİN bağlı DEĞİL).
+VARSAYILAN_VIA_GECIS_GECIKMESI_PS = 5.0
+
+
+@dataclass
+class KartYolSegmenti:
+    """HOST'tan TEK bir kamera kartına giden fiziksel yolun uzunluk/geçiş
+    bileşenleri — clock/trigger hattının TOPLAM gecikmesini hesaplamak
+    için gerekli tüm parçalar (host PCB izi + host<->kart kablosu + kart
+    PCB izi + katman geçiş/via sayısı)."""
+
+    kart_adi: str
+    host_pcb_uzunluk_mm: float = 0.0
+    kablo_uzunluk_mm: float = 0.0
+    kart_pcb_uzunluk_mm: float = 0.0
+    katman_gecis_sayisi: int = 0
+
+
+@dataclass
+class KartGecikmeSonucu:
+    kart_adi: str
+    toplam_gecikme_ps: float
+    pcb_gecikme_ps: float
+    kablo_gecikme_ps: float
+    via_gecikme_ps: float
+
+
+@dataclass
+class CokluKartSkewButcesiSonucu:
+    kart_sonuclari: Dict[str, KartGecikmeSonucu]
+    en_hizli_kart: str
+    en_yavas_kart: str
+    maks_skew_ps: float
+    butce_ps: float
+    butce_asildi_mi: bool
+
+
+def coklu_kart_skew_butcesi_hesapla(
+    yollar: Sequence[KartYolSegmenti],
+    butce_ps: float,
+    pcb_hiz_mm_ns: float = FR4_MIKROSERIT_HIZ_MM_NS,
+    kablo_hiz_mm_ns: float = VARSAYILAN_KABLO_HIZ_MM_NS,
+    via_gecis_gecikmesi_ps: float = VARSAYILAN_VIA_GECIS_GECIKMESI_PS,
+) -> CokluKartSkewButcesiSonucu:
+    """HOST'tan HER kamera kartına giden clock/trigger hattının TOPLAM
+    gecikmesini (PCB izi + kablo + katman geçişi) hesaplar; kartlar ARASI
+    en büyük fark (skew) `butce_ps` ile karşılaştırılır.
+
+    Bölüm 4'ün TEK-net skew hesabının ÇOKLU-KART genişlemesidir — HER kart
+    kendi (potansiyel olarak farklı uzunlukta) HOST->kart yolunu taşır,
+    skew bu yolların GERÇEK toplam gecikme FARKIdır (bir net'in kendi P/N
+    çifti içi mm skew'i DEĞİL).
+
+    `yollar` boşsa `ValueError` — en az bir kart yolu anlamlı bir skew
+    hesabı için ZORUNLUDUR (skew tanımı gereği en az 2 karşılaştırma
+    noktası ister, ama tek kartlı çağrı da "referansa göre skew=0"
+    anlamında kabul edilir — çağıran taraf henüz eksik veriyle erken
+    tespit yapabilsin diye reddetmiyoruz, sadece boş liste reddedilir).
+
+    SINIR: via gecikmesi kaba bir sabit yaklaşımdır (bkz. modül seviyesi
+    not), kablo hızının GERÇEK değeri kullanıcının kendi kablo
+    datasheet'inden gelmelidir — varsayılan sadece veri yoksa kullanılır.
+    """
+    if not yollar:
+        raise ValueError("En az bir kart yolu (KartYolSegmenti) gerekir.")
+
+    sonuclar: Dict[str, KartGecikmeSonucu] = {}
+    for yol in yollar:
+        pcb_ps = skew_mm_den_ps_e_cevir(
+            yol.host_pcb_uzunluk_mm + yol.kart_pcb_uzunluk_mm, pcb_hiz_mm_ns
+        )
+        kablo_ps = skew_mm_den_ps_e_cevir(yol.kablo_uzunluk_mm, kablo_hiz_mm_ns)
+        via_ps = yol.katman_gecis_sayisi * via_gecis_gecikmesi_ps
+        toplam_ps = pcb_ps + kablo_ps + via_ps
+        sonuclar[yol.kart_adi] = KartGecikmeSonucu(
+            kart_adi=yol.kart_adi,
+            toplam_gecikme_ps=round(toplam_ps, 4),
+            pcb_gecikme_ps=round(pcb_ps, 4),
+            kablo_gecikme_ps=round(kablo_ps, 4),
+            via_gecikme_ps=round(via_ps, 4),
+        )
+
+    en_yavas = max(sonuclar.values(), key=lambda s: s.toplam_gecikme_ps)
+    en_hizli = min(sonuclar.values(), key=lambda s: s.toplam_gecikme_ps)
+    maks_skew_ps = round(en_yavas.toplam_gecikme_ps - en_hizli.toplam_gecikme_ps, 4)
+
+    return CokluKartSkewButcesiSonucu(
+        kart_sonuclari=sonuclar,
+        en_hizli_kart=en_hizli.kart_adi,
+        en_yavas_kart=en_yavas.kart_adi,
+        maks_skew_ps=maks_skew_ps,
+        butce_ps=butce_ps,
+        butce_asildi_mi=maks_skew_ps > butce_ps,
+    )
