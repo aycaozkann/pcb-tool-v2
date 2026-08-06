@@ -18,6 +18,7 @@ from enum import Enum, auto
 from typing import List, Dict, Tuple
 
 from empedans_cozucu import stackup_tara
+from bulgu_sozlesmesi import Bulgu, bulgu_uret
 
 
 # ------------------------------------------------------------------
@@ -55,6 +56,7 @@ class AraBirimTuru(Enum):
     LVDS = auto()
     PCIE = auto()
     DDR3_4 = auto()  # tipik olarak single-ended ama uzunluk eşleştirme kritik
+    MIPI_CSI2_DPHY = auto()  # kamera sensörü <-> SoC (OG05B10 vb.)
 
 
 class FrekansBandi(Enum):
@@ -441,6 +443,51 @@ def fiziksel_dogrulama_yap(
 
 
 # ------------------------------------------------------------------
+# 6b. HDI VIA TİPİ ASPECT-RATIO DOĞRULAMASI (via_siniflandirma.py GENİŞLETMESİ)
+# ------------------------------------------------------------------
+#
+# NOT (döngüsel import): `via_siniflandirma.py` bu dosyadaki
+# `KATMAN_KALINLIK_VARSAYIMI_MM`'i import ediyor (tek yönlü bağımlılık).
+# Bu fonksiyonun `Via`/`ViaTipiDetay` tipine ihtiyacı olduğu için import
+# BURADA, FONKSİYON GÖVDESİ İÇİNDE (deferred/local) yapılır — döngüsel
+# import'u kırmanın standart yolu, modül seviyesinde YAPILMAZ.
+
+def via_tipi_aspect_ratio_kontrolu(via: "Via") -> Bulgu:  # noqa: F821 (deferred import)
+    """Tek bir via'nın GERÇEK tipine (`ViaTipiDetay`) göre aspect-ratio
+    sınırını doğrular — `fiziksel_dogrulama_yap`'taki KONTROL 3'ün
+    board-genel/politika seviyesindeki 8:1 sınırından FARKLI: burada her
+    via KENDİ tipine göre (KOR/GOMULU/MIKROVIA için 1:1, BOYDAN_BOYA için
+    `maks_izinli_aspect_ratio` ile AYNI 8:1 sabiti — DEĞİŞTİRİLMEDİ)
+    değerlendirilir.
+    """
+    from via_siniflandirma import ViaTipiDetay  # noqa: F401 (tip kontrolü/okunabilirlik)
+
+    sinir = via.maks_izinli_aspect_oran
+    oran = via.aspect_oran
+    ihlaller = []
+    if oran > sinir:
+        ihlaller.append({
+            "via_net": via.net_isim,
+            "via_tipi": via.tipi.name,
+            "olculen_aspect_oran": round(oran, 3),
+            "izinli_sinir": sinir,
+            "baslangic_katman": via.baslangic_katman,
+            "bitis_katman": via.bitis_katman,
+            "matkap_capi_mm": via.matkap_capi_mm,
+        })
+    return bulgu_uret(
+        "via_tipi_aspect_ratio",
+        taranan=1,
+        ihlaller=ihlaller,
+        detay=(
+            f"{via.tipi.name} via için izinli aspect ratio {sinir:.0f}:1 "
+            f"(KOR/GOMULU/MIKROVIA lazer/kör delik teknolojisi ~1:1 gerektirir, "
+            f"BOYDAN_BOYA mekanik delik 8:1'e kadar güvenilir metalize olur)."
+        ),
+    )
+
+
+# ------------------------------------------------------------------
 # 7. FAZ 1: İZ GENİŞLİĞİ / AKIM HESABI (IPC-2221 YAKLAŞIK FORMÜLÜ)
 # ------------------------------------------------------------------
 #
@@ -618,6 +665,13 @@ ARAYUZ_EMPEDANS_HEDEFLERI: Dict[AraBirimTuru, float] = {
     AraBirimTuru.LVDS: 100.0,
     AraBirimTuru.PCIE: 85.0,
     AraBirimTuru.DDR3_4: 40.0,  # single-ended karakteristik empedans (yaklaşık)
+    # 100Ω ±10%: birden fazla bağımsız kaynakta (Cadence MIPI PCB tasarım
+    # rehberi, MIPI DSI/D-PHY layout notları) tutarlı — önceden bu satır
+    # yoktu, fonksiyon 100.0 varsayılanına DÜŞÜYORDU (rastlantısal doğru,
+    # ama isimsiz/kasıtsız). OG05B10 datasheet'i farklı bir tolerans
+    # verirse (NDA'lı, henüz alınmadı) bu SAYI değil TOLERANS ayrı
+    # aşağıda güncellenmeli, ikisi karıştırılmamalı.
+    AraBirimTuru.MIPI_CSI2_DPHY: 100.0,
 }
 
 
@@ -687,6 +741,13 @@ ARAYUZ_UZUNLUK_TOLERANSI_MM: Dict[AraBirimTuru, float] = {
     AraBirimTuru.LVDS: 0.5,
     AraBirimTuru.PCIE: 0.13,
     AraBirimTuru.DDR3_4: 0.13,
+    # 0.127mm (5 mil): MIPI D-PHY intra-pair skew için endüstride yaygın
+    # kabul gören üst sınır — birden fazla bağımsız kaynakta (Cadence,
+    # gdugpcba MIPI tasarım rehberi, pcbartists MIPI DSI notları)
+    # ≤5 mil olarak tutarlı. NOT: OG05B10'un kendi datasheet'i (NDA'lı,
+    # henüz alınmadı) daha sıkı bir değer verirse BU SAYI güncellenmeli —
+    # bu, genel D-PHY pratiği, sensöre özel garanti DEĞİL.
+    AraBirimTuru.MIPI_CSI2_DPHY: 0.127,
 }
 
 

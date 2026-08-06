@@ -29,7 +29,9 @@ from pcb_stackup_planner import (
     DiferansiyelCift,
     ViaKullanimi,
     empedans_hedefi_getir,
+    ARAYUZ_EMPEDANS_HEDEFLERI,
     length_matching_kontrolu,
+    ARAYUZ_UZUNLUK_TOLERANSI_MM,
     via_stub_analizi,
     FrekansBandi,
     AntenYerlesimi,
@@ -443,6 +445,15 @@ def test_override_verilirse_kullanilir():
     assert empedans_hedefi_getir(cift) == 95.0
 
 
+def test_mipi_csi2_dphy_empedans_hedefi_kasitli_100ohm():
+    """DÜZELTME: eskiden MIPI_CSI2_DPHY tabloda YOKTU, `.get(..., 100.0)`
+    varsayılanına DÜŞÜYORDU — rastlantısal doğru ama isimsizdi. Artık
+    tabloda AÇIKÇA 100Ω olarak tanımlı (Cadence/D-PHY layout notları)."""
+    cift = DiferansiyelCift("MIPI_D0", AraBirimTuru.MIPI_CSI2_DPHY, 20.0, 20.0, veri_hizi_Gbps=2.5)
+    assert empedans_hedefi_getir(cift) == 100.0
+    assert AraBirimTuru.MIPI_CSI2_DPHY in ARAYUZ_EMPEDANS_HEDEFLERI
+
+
 # ------------------------------------------------------------------
 # FAZ 2: length_matching_kontrolu
 # ------------------------------------------------------------------
@@ -464,6 +475,22 @@ def test_pcie_dar_toleransta_kucuk_fark_bile_hata_verir():
     cift = DiferansiyelCift("PCIE", AraBirimTuru.PCIE, 30.0, 30.2, veri_hizi_Gbps=16.0)
     hatalar = length_matching_kontrolu(cift)
     assert any("LENGTH MATCHING HATASI" in h for h in hatalar)
+
+
+def test_mipi_csi2_dphy_uzunluk_toleransi_5mil():
+    """DÜZELTME: eskiden MIPI_CSI2_DPHY tabloda YOKTU, jenerik 0.5mm
+    varsayılanına düşüyordu — artık D-PHY intra-pair skew pratiğine göre
+    0.127mm (5 mil), USB3'ten (0.5mm) DAHA SIKI bir tolerans."""
+    cift = DiferansiyelCift("MIPI_D0", AraBirimTuru.MIPI_CSI2_DPHY, 20.0, 20.15, veri_hizi_Gbps=2.5)
+    hatalar = length_matching_kontrolu(cift)
+    assert any("LENGTH MATCHING HATASI" in h for h in hatalar)
+    assert AraBirimTuru.MIPI_CSI2_DPHY in ARAYUZ_UZUNLUK_TOLERANSI_MM
+    assert ARAYUZ_UZUNLUK_TOLERANSI_MM[AraBirimTuru.MIPI_CSI2_DPHY] == pytest.approx(0.127)
+
+
+def test_mipi_csi2_dphy_tolerans_icinde_hata_yok():
+    cift = DiferansiyelCift("MIPI_D0", AraBirimTuru.MIPI_CSI2_DPHY, 20.0, 20.05, veri_hizi_Gbps=2.5)
+    assert length_matching_kontrolu(cift) == []
 
 
 # ------------------------------------------------------------------
