@@ -1,0 +1,77 @@
+# arayuz_sozlesmesi.yaml
+# ========================
+# Kamera kartı (x6, TEK fiziksel tasarım) <-> ana/hub kart arasındaki HER
+# şeyin TEK KAYNAĞI. Bu dosya insan tarafından elle yazılır/güncellenir;
+# `coklu_kart_sozlesme_kontrolu.py` bunu HER İKİ KiCad projesine (kamera
+# kartı .kicad_pcb, ana kart .kicad_pcb) karşı çapraz doğrular.
+#
+# Bir taraf değişip diğeri güncellenmezse (örn. kamera kartında bir pin
+# sırası değişir, ana kart konnektörü hâlâ eskisini bekler) bu dosya
+# GÜNCELLENMEDEN önce `python main.py coklu-kart-dogrula` FAIL vermelidir —
+# aksi halde sözleşme ile gerçek donanım arasında sessiz bir sapma olur.
+#
+# NOT (net eşleştirme modeli): `pinler[].net`, KAMERA KARTININ tek
+# konnektörü için TAM olarak beklenen net adıdır. Ana kart tarafında 6
+# konnektör olduğu için (her biri farklı bir kameraya gider), gerçek net
+# adları genelde konnektör başına farklıdır (örn. "CAM1_VCAM",
+# "CAM2_VCAM"...). `konnektor.ana_kart_net_sablonu` bu farkı modellemek
+# için bir şablon dizesidir: `{net}` = pinin sözleşmedeki net adı, `{kart}`
+# = 1..konnektor_sayisi konnektör numarası. Ana kartın 6 konnektörü de
+# LİTERAL olarak aynı net adını kullanıyorsa (örn. hiyerarşik sayfa
+# örnekleme ile), şablonu varsayılan "{net}" bırakın (değişiklik gerekmez).
+
+versiyon: 1
+
+konnektor:
+  # Kamera kartındaki ve ana karttaki HER konnektörün pin sayısı.
+  pin_sayisi: 6
+
+  # Kamera kartında bu konnektörün footprint referansı (tam eşleşme).
+  kamera_karti_referans: "J1"
+
+  # Ana karttaki 6 konnektörün referans ŞABLONU — {kart} 1..pin_sayisi
+  # (kart_sayisi ile aynı) aralığında yerine konur (örn. "J1".."J6").
+  ana_kart_referans_sablonu: "J{kart}"
+
+  # Ana kart tarafında beklenen net adı şablonu. Varsayılan "{net}" —
+  # ana kartın 6 konnektörü de kamera kartıyla LİTERAL aynı net adını
+  # kullanıyorsa değiştirmeyin. Konnektöre özgü ön ek gerekiyorsa
+  # (örn. "CAM{kart}_{net}") burada tanımlayın.
+  ana_kart_net_sablonu: "{net}"
+
+  # UYARI: "no:" anahtarı YAML 1.1'de TIRNAKSIZ yazılırsa "no"/"yes" gibi
+  # kelimeler boolean'a çözümlenir (PyYAML klasik tuzağı) — pin numarası
+  # anahtarı bu yüzden HER ZAMAN "no" (tırnaklı) yazılmalı.
+  pinler:
+    - {"no": 1, net: "GMSL_A_P", yon: "diferansiyel_cikis", voltaj: null}
+    - {"no": 2, net: "GMSL_A_N", yon: "diferansiyel_cikis", voltaj: null}
+    - {"no": 3, net: "VCAM",     yon: "guc_girisi",         voltaj: "12V"}
+    - {"no": 4, net: "GND",      yon: "guc_donusu",         voltaj: null}
+    - {"no": 5, net: "I2C_SDA",  yon: "cift_yonlu",         voltaj: "3V3"}
+    - {"no": 6, net: "I2C_SCL",  yon: "cift_yonlu",         voltaj: "3V3"}
+
+# Sistem güç bütçesi — 6 kamera kartı + ana kartın giriş konnektörü/
+# sigortasının bunu karşıladığının doğrulanması.
+guc_butcesi:
+  kart_basi_maks_akim_a: 0.4
+  kart_sayisi: 6
+  # toplam + bu marj = kablo/sigorta/PTC seçim hedefi
+  ana_kart_giris_marj_yuzde: 25
+  # Ana kartın gerçek güç giriş konnektörü/sigortasının maksimum akımı.
+  # `main.py coklu-kart-dogrula --ana-kart-guc-girisi-maks-a ...` ile
+  # çağrı-anında EZİLEBİLİR (örn. farklı bir revizyon denemesi için);
+  # burada tanımlı olan değer VARSAYILAN/kayıtlı gerçek donanım değeridir.
+  ana_kart_guc_girisi_maks_a: 3.5
+
+# MIPI virtual channel ID planı — bring-up sırasında strap direnç/OTP ile
+# HER kamera kartına atanacak VC ID. Ana kartın deserializer'ının
+# desteklediği aralıkla VE birbirleriyle çakışmamalı.
+vc_id:
+  aralik: [0, 5]
+  atama:
+    kart_1: 0
+    kart_2: 1
+    kart_3: 2
+    kart_4: 3
+    kart_5: 4
+    kart_6: 5
