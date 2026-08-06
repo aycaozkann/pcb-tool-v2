@@ -42,6 +42,13 @@ import sys
 
 from kicad_koprusu import drc_calistir, drc_temiz_mi, erc_calistir, erc_temiz_mi, sema_taninmadi_mi
 from uretim_zinciri_koprusu import kibot_calistir, kibot_config_yaz
+from routing_karar_tablosu import uret_ve_kaydet
+# NOT: `routing_karar_tablosu.py` modül SEVİYESİNDE `pcbnew`/`openpyxl`
+# import ETMEZ (ikisi de fonksiyon gövdesi içinde lazy) — bu üstteki import
+# [[MASTER_RULEBOOK: pcbnew Bağımlılığı Her Zaman Lazy]] kuralını İHLAL
+# ETMEZ, ve `test_uretim_ciktilari_cli.py`'nin `kibot_calistir` için
+# kullandığı `monkeypatch.setattr(cli, "uret_ve_kaydet", ...)` deseniyle
+# TUTARLI kalır.
 
 
 def dogrulama_kapisini_calistir(
@@ -150,6 +157,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--force-atla-dogrulama", action="store_true",
                     help="SADECE hata ayıklama — DRC/ERC dahil HER ŞEYİ atlar, normal akışta KULLANMA")
+    ap.add_argument(
+        "--routing-tablosu", action="store_true",
+        help="`routing_karar_tablosu.py` ile net-bazlı routing karar tablosunu "
+             "(XLSX + CSV, 'Kalan_Baglantilar' sekmesi dahil) AYNI çıktı "
+             "dizinine üretir. `pcbnew` yoksa (bu ortamda pip-kurulu değil) "
+             "sessizce atlanmaz — açık bir uyarı basılır, komutun geri kalanı "
+             "(Gerber/BOM/CPL) yine tamamlanır.",
+    )
+    ap.add_argument(
+        "--drc-json", help="`--routing-tablosu` için: gerçek DRC violations JSON yolu "
+             "(verilmezse tablodaki 'DRC Durumu' sütunu N/A kalır, tahmin ÜRETİLMEZ)",
+    )
+    ap.add_argument(
+        "--router-log", help="`--routing-tablosu` için: router log dosyası (unrouted net'lerin "
+             "'neden çizilemedi' sütunu için — verilmezse 'denenmedi' yazılır)",
+    )
+    ap.add_argument(
+        "--karar-birimleri-json", help="`--routing-tablosu` için: DOCS/karar_birimleri.json yolu "
+             "(unrouted net'leri ilgili karar kayıtlarına bağlamak için, opsiyonel)",
+    )
     args = ap.parse_args(argv)
 
     if not args.force_atla_dogrulama:
@@ -179,6 +206,26 @@ def main(argv: list[str] | None = None) -> int:
         print(sonuc.stderr, file=sys.stderr)
         return 1
     print(f"\nÜretim çıktıları hazır: {sonuc.cikti_dizini}/")
+
+    if args.routing_tablosu:
+        rt_sonuc = uret_ve_kaydet(
+            args.board, args.cikti_dizini,
+            drc_json_yolu=args.drc_json,
+            router_log_yolu=args.router_log,
+            karar_birimleri_yolu=args.karar_birimleri_json,
+        )
+        if not rt_sonuc["basarili"]:
+            print(f"\nUYARI: routing karar tablosu üretilemedi — {rt_sonuc['kapsam_yok_detay']}",
+                  file=sys.stderr)
+            # KAPSAM_YOK burada Gerber/BOM/CPL'in kendisini GERİYE ALMAZ —
+            # bu bayrak tamamlayıcı bir çıktıdır, ana üretim zincirini kilitlemez.
+        else:
+            print(f"\nRouting karar tablosu: {', '.join(rt_sonuc['csv_yollari'])}"
+                  + (f", {rt_sonuc['xlsx_yolu']}" if rt_sonuc["xlsx_yazildi"] else
+                     " (openpyxl yok — sadece CSV üretildi, XLSX atlandı)")
+                  + f" — {rt_sonuc['routelanmis_sayisi']} routelanmış, "
+                    f"{rt_sonuc['routsuz_sayisi']} routsuz net.")
+
     return 0
 
 

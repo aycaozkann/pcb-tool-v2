@@ -225,3 +225,72 @@ def test_main_gercek_board_kontrolu_atla_bayragi_iletilir(monkeypatch, tmp_path)
     cli.main(["b.kicad_pcb", "s.kicad_sch", "--kibot-config", str(kibot_yaml),
               "--cikti-dizini", str(tmp_path / "uretim"), "--gercek-board-kontrolu-atla"])
     assert yakalanan.get("gercek_board_kontrolu_atla") is True
+
+
+# ------------------------------------------------------------------
+# GÖREV (2026-08-04): --routing-tablosu bayrağı, AYNI komutta opsiyonel
+# ------------------------------------------------------------------
+
+def _temel_main_ortami(monkeypatch, tmp_path):
+    """`--routing-tablosu` testleri için ortak: dogrulama+kibot mock'ları."""
+    monkeypatch.setattr(cli, "dogrulama_kapisini_calistir", lambda board, sch, **kw: (True, []))
+
+    class SahteSonuc:
+        basarili = True
+        stdout = "ok"
+        stderr = ""
+        cikti_dizini = str(tmp_path / "uretim")
+
+    monkeypatch.setattr(cli, "kibot_calistir", lambda *a, **kw: SahteSonuc())
+    monkeypatch.setattr(cli, "kibot_config_yaz", lambda hedef: hedef)
+    kibot_yaml = tmp_path / "kibot.yaml"
+    kibot_yaml.write_text("mevcut")
+    return kibot_yaml
+
+
+def test_routing_tablosu_bayragi_verilmezse_hic_cagrilmaz(monkeypatch, tmp_path):
+    kibot_yaml = _temel_main_ortami(monkeypatch, tmp_path)
+    cagrildi = {"cagrildi": False}
+    monkeypatch.setattr(cli, "uret_ve_kaydet", lambda *a, **kw: cagrildi.update(cagrildi=True))
+
+    kod = cli.main(["b.kicad_pcb", "s.kicad_sch", "--kibot-config", str(kibot_yaml),
+                    "--cikti-dizini", str(tmp_path / "uretim")])
+    assert kod == 0
+    assert cagrildi["cagrildi"] is False
+
+
+def test_routing_tablosu_bayragiyla_ayni_komutta_uretilir(monkeypatch, tmp_path):
+    kibot_yaml = _temel_main_ortami(monkeypatch, tmp_path)
+    yakalanan = {}
+
+    def sahte_uret_ve_kaydet(board, cikti_dizini, drc_json_yolu=None, router_log_yolu=None,
+                              karar_birimleri_yolu=None):
+        yakalanan.update(board=board, cikti_dizini=cikti_dizini, drc=drc_json_yolu)
+        return {"basarili": True, "xlsx_yazildi": True, "xlsx_yolu": "x.xlsx",
+                "csv_yollari": ["a.csv", "b.csv"], "routelanmis_sayisi": 5,
+                "routsuz_sayisi": 2, "kapsam_yok_detay": None}
+
+    monkeypatch.setattr(cli, "uret_ve_kaydet", sahte_uret_ve_kaydet)
+
+    kod = cli.main(["b.kicad_pcb", "s.kicad_sch", "--kibot-config", str(kibot_yaml),
+                    "--cikti-dizini", str(tmp_path / "uretim"), "--routing-tablosu",
+                    "--drc-json", "drc.json"])
+    assert kod == 0
+    assert yakalanan["board"] == "b.kicad_pcb"
+    assert yakalanan["drc"] == "drc.json"
+
+
+def test_routing_tablosu_pcbnew_yoksa_ana_zinciri_kilitlemez(monkeypatch, tmp_path, capsys):
+    """KAPSAM_YOK (pcbnew yok) Gerber/BOM/CPL'in kendisini GERİYE ALMAZ —
+    tamamlayıcı bir çıktıdır, ana üretim zincirini kilitlemez."""
+    kibot_yaml = _temel_main_ortami(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "uret_ve_kaydet", lambda *a, **kw: {
+        "basarili": False, "xlsx_yazildi": False, "csv_yollari": [],
+        "kapsam_yok_detay": "pcbnew modülü bulunamadı",
+    })
+
+    kod = cli.main(["b.kicad_pcb", "s.kicad_sch", "--kibot-config", str(kibot_yaml),
+                    "--cikti-dizini", str(tmp_path / "uretim"), "--routing-tablosu"])
+    assert kod == 0  # ana zincir hâlâ başarılı
+    cikti = capsys.readouterr()
+    assert "pcbnew modülü bulunamadı" in cikti.err
