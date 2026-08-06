@@ -986,6 +986,21 @@ def test_coklu_kart_dogrula_karar_proje_dir_verilirse_karar_birimleri_json_yazil
     )
 
 
+def test_envanter_guncelle_xlsx_uretir(tmp_path):
+    """`--testleri-atla` ile hızlı — tam suite koşumu bu testin kapsamı
+    dışında (`yetenek_envanteri_uret.py`'nin kendi testleri bunu kanıtlıyor),
+    burada sadece main.py CLI köprüsünün gerçekten çağrıldığı doğrulanır."""
+    (tmp_path / "ornek_modul.py").write_text('"""Örnek modül."""\ndef f():\n    pass\n', encoding="utf-8")
+
+    args = main.build_parser().parse_args([
+        "envanter-guncelle", "--repo-dizini", str(tmp_path), "--testleri-atla",
+    ])
+    kod = main.cmd_envanter_guncelle(args)
+
+    assert kod == 0
+    assert (tmp_path / "YETENEK_ENVANTERI.xlsx").exists()
+
+
 def test_coklu_kart_dogrula_bos_board_kapsam_yok_fail(tmp_path, capsys):
     """Konnektör hiç bulunamazsa (KAPSAM_YOK) bu PASS SAYILMAZ — dosya
     başlığındaki 'taranan==0 asla PASS değildir' disiplininin CLI'dan
