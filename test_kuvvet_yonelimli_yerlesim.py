@@ -40,6 +40,10 @@ from kuvvet_yonelimli_yerlesim import (
     yuksek_hiz_keepout_kontrolu,
     yuksek_hizli_net_mi,
     _testin_bos_olmadigini_kanitla,
+    GecmisYerlesimOrnegi,
+    MIN_KALIBRASYON_ORNEK_SAYISI,
+    ornek_yerlesimden_uret,
+    skor_agirliklarini_kalibre_et,
 )
 
 
@@ -721,6 +725,109 @@ class TestYerlesimSkoru:
         skor_yakin = yerlesim_skoru(yakin, netler, [])
         skor_uzak = yerlesim_skoru(uzak, netler, [])
         assert skor_uzak.hs_kompaktlik_skoru > skor_yakin.hs_kompaktlik_skoru
+
+
+class TestSkorAgirliklarinKalibreEt:
+    """FAZ 0.5 #34: skor_agirliklarini_kalibre_et() — küçük-ölçekli,
+    deterministik NNLS regresyonu (büyük ML modeli DEĞİL)."""
+
+    def _ornekler_uret(self, agirliklar, n=10, gurultu=None):
+        """Bilinen `agirliklar` (ratsnest, keepout, termal, hs) ile SENTETİK,
+        gürültüsüz (veya `gurultu` fonksiyonuyla hafif bozulmuş) örnekler
+        üretir — nnls'in bilinen katsayıyı geri kazandığını doğrulamak için."""
+        ornekler = []
+        for i in range(n):
+            # DİKKAT: dört özellik birbirinden LİNEER BAĞIMSIZ olmalı (farklı
+            # mod/çarpan desenleri) — hepsi TEK bir `i` değişkeninin afin
+            # fonksiyonu olursa özellik matrisi RANK-EKSİK kalır ve nnls
+            # gerçek ağırlıkları değil, sıfır-artıklı SONSUZ ÇÖZÜMDEN
+            # rastgele birini geri döndürür (bu testte bir kez yaşandı).
+            ratsnest = 10.0 + i * 3.0
+            keepout = float(i % 3)
+            termal = float(i % 4) * 0.5
+            hs = float((i * 7) % 11) * 0.9
+            hedef = (
+                agirliklar[0] * ratsnest
+                + agirliklar[1] * keepout
+                + agirliklar[2] * termal
+                + agirliklar[3] * hs
+            )
+            if gurultu is not None:
+                hedef += gurultu(i)
+            ornekler.append(
+                GecmisYerlesimOrnegi(
+                    isim=f"board_{i}",
+                    ratsnest_mm=ratsnest,
+                    keepout_ihlal_sayisi=keepout,
+                    termal_yayilim_skoru=termal,
+                    hs_kompaktlik_skoru=hs,
+                    gercek_kalite_puani=hedef,
+                )
+            )
+        return ornekler
+
+    def test_az_ornekle_reddedilir(self):
+        az_ornekler = self._ornekler_uret((1.0, 50.0, 1.0, 1.0), n=MIN_KALIBRASYON_ORNEK_SAYISI - 1)
+        with pytest.raises(ValueError):
+            skor_agirliklarini_kalibre_et(az_ornekler)
+
+    def test_bilinen_dogrusal_iliskiyi_geri_kazanir(self):
+        gercek_agirliklar = (2.0, 80.0, 3.0, 0.5)
+        ornekler = self._ornekler_uret(gercek_agirliklar, n=12)
+
+        sonuc = skor_agirliklarini_kalibre_et(ornekler)
+
+        assert sonuc.agirlik_ratsnest == pytest.approx(gercek_agirliklar[0], abs=1e-3)
+        assert sonuc.agirlik_keepout == pytest.approx(gercek_agirliklar[1], abs=1e-3)
+        assert sonuc.agirlik_termal == pytest.approx(gercek_agirliklar[2], abs=1e-3)
+        assert sonuc.agirlik_hs_kompaktlik == pytest.approx(gercek_agirliklar[3], abs=1e-3)
+        assert sonuc.kalan_hata_normu == pytest.approx(0.0, abs=1e-3)
+        assert sonuc.ornek_sayisi == 12
+
+    def test_agirliklar_asla_negatif_olamaz(self):
+        # Bilerek "keepout ihlali arttıkça kalite İYİLEŞİYORMUŞ gibi görünen"
+        # gürültülü/ters-korelasyonlu bir veri seti — NNLS yine de negatif
+        # ağırlık ÜRETEMEZ (yapısal kısıt), en kötü ihtimalle o ağırlığı 0 yapar.
+        ornekler = self._ornekler_uret((1.0, -30.0, 1.0, 1.0), n=10)
+
+        sonuc = skor_agirliklarini_kalibre_et(ornekler)
+
+        assert sonuc.agirlik_ratsnest >= 0.0
+        assert sonuc.agirlik_keepout >= 0.0
+        assert sonuc.agirlik_termal >= 0.0
+        assert sonuc.agirlik_hs_kompaktlik >= 0.0
+
+    def test_determinizm_ayni_ornekler_ayni_agirliklar(self):
+        ornekler = self._ornekler_uret((1.5, 40.0, 2.0, 0.8), n=10)
+
+        s1 = skor_agirliklarini_kalibre_et(ornekler)
+        s2 = skor_agirliklarini_kalibre_et(ornekler)
+
+        assert s1 == s2
+
+    def test_ornek_yerlesimden_uret_bilesenleri_yerlesim_skoru_ile_tutarli(self):
+        from kuvvet_yonelimli_yerlesim import YerlesimSonucu
+
+        komponentler = [Komponent("A"), Komponent("B", x=5.0, y=5.0)]
+        netler = [Net("MIPI_D0_P", ["A", "B"])]
+        koordinatlar = {"A": (0.0, 0.0), "B": (5.0, 5.0)}
+        sonuc = YerlesimSonucu(koordinatlar, 1, True, 0.0, 7.07, 7.07)
+        keepoutlar = [YuksekHizKeepout("HS", 2.5, 2.5, 10.0)]
+
+        ornek = ornek_yerlesimden_uret(
+            "test_board", sonuc, netler, gercek_kalite_puani=42.0,
+            komponentler=komponentler, keepoutlar=keepoutlar,
+        )
+        skor = yerlesim_skoru(
+            sonuc, netler, komponentler, keepoutlar=keepoutlar,
+            agirlik_ratsnest=1.0, agirlik_keepout=1.0,
+            agirlik_termal=1.0, agirlik_hs_kompaktlik=1.0,
+        )
+
+        assert ornek.ratsnest_mm == skor.ratsnest_mm
+        assert ornek.keepout_ihlal_sayisi == skor.keepout_ihlal_sayisi
+        assert ornek.hs_kompaktlik_skoru == skor.hs_kompaktlik_skoru
+        assert ornek.gercek_kalite_puani == 42.0
 
 
 class TestCokluYerlesimDene:

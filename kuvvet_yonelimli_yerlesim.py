@@ -36,6 +36,16 @@ başlangıç yerleşimi RASTGELE DEĞİL: altın-açı (golden angle) spirali il
 DETERMİNİSTİK olarak üretilir. Aynı netlist -> her zaman aynı koordinatlar;
 aksi halde "iki çalıştırmada iki farklı kart" çıkar ve hiçbir rapor
 tekrarlanabilir olmaz.
+
+FAZ 0.5 #34 — `skor_agirliklarini_kalibre_et()`:
+--------------------------------------------------
+`yerlesim_skoru()`'nun dört ağırlığı (ratsnest/keepout/termal/hs-kompaktlık)
+elle seçilmiş sabitlerdi. Bu fonksiyon onları geçmiş, GERÇEK kalitesi
+bilinen board örneklerinden `scipy.optimize.nnls` (negatif-olmayan en
+küçük kareler) ile kalibre eder — KADEME 2 küçük-ölçekli, TAM DETERMİNİSTİK
+bir istatistik, büyük bir ML modeli DEĞİLDİR (`random` kullanılmaz, aynı
+örnekler HER ZAMAN aynı ağırlıkları üretir). Bkz. `GecmisYerlesimOrnegi`,
+`ornek_yerlesimden_uret()`.
 """
 
 from __future__ import annotations
@@ -965,6 +975,38 @@ def yerlesim_skoru(
 
     Toplam skor ağırlıklı TOPLAMDIR (düşük = iyi).
     """
+    ihlal_sayisi, termal_skoru, hs_kompaktlik = _skor_bilesenlerini_hesapla(
+        sonuc, netler, komponentler, keepoutlar, termal_kisitlar
+    )
+    toplam = (
+        agirlik_ratsnest * sonuc.son_ratsnest_mm
+        + agirlik_keepout * ihlal_sayisi
+        + agirlik_termal * termal_skoru
+        + agirlik_hs_kompaktlik * hs_kompaktlik
+    )
+    return YerlesimSkoru(
+        parametre_seti_ismi=parametre_seti_ismi,
+        toplam_skor=round(toplam, 4),
+        ratsnest_mm=sonuc.son_ratsnest_mm,
+        keepout_ihlal_sayisi=ihlal_sayisi,
+        termal_yayilim_skoru=round(termal_skoru, 4),
+        hs_kompaktlik_skoru=round(hs_kompaktlik, 4),
+    )
+
+
+def _skor_bilesenlerini_hesapla(
+    sonuc: YerlesimSonucu,
+    netler: Sequence[Net],
+    komponentler: Sequence[Komponent] = (),
+    keepoutlar: Sequence["YuksekHizKeepout"] = (),
+    termal_kisitlar: Sequence[MesafeKisiti] = (),
+) -> Tuple[int, float, float]:
+    """`yerlesim_skoru()`'nun AĞIRLIKSIZ ham bileşenlerini hesaplar
+    (keepout ihlal sayısı, termal yayılım skoru, hs kompaktlık skoru) —
+    hem `yerlesim_skoru()` hem `skor_agirliklarini_kalibre_et()`'in
+    özellik (feature) çıkarımı bu TEK yerden beslenir, iki yerde aynı
+    mantığın SESSİZCE ayrışması riskini önler.
+    """
     ihlal_sayisi = 0
     if keepoutlar and komponentler:
         komponent_haritasi = {k.ref: k for k in komponentler}
@@ -994,19 +1036,132 @@ def yerlesim_skoru(
         ys = [sonuc.koordinatlar[p][1] for p in pinler]
         hs_kompaktlik += math.hypot(max(xs) - min(xs), max(ys) - min(ys))
 
-    toplam = (
-        agirlik_ratsnest * sonuc.son_ratsnest_mm
-        + agirlik_keepout * ihlal_sayisi
-        + agirlik_termal * termal_skoru
-        + agirlik_hs_kompaktlik * hs_kompaktlik
+    return ihlal_sayisi, termal_skoru, hs_kompaktlik
+
+
+@dataclass
+class GecmisYerlesimOrnegi:
+    """Kalibrasyon girdisi: bir GEÇMİŞ yerleşimin ham skor bileşenleri +
+    o yerleşimin GERÇEK (insan/DRC-sonrası doğrulanmış) kalite puanı.
+
+    `gercek_kalite_puani`: DÜŞÜK = İYİ (yerlesim_skoru() ile AYNI yön) —
+    ör. gerçek routing sonrası kalan DRC ihlali + rework gerektiren
+    komponent sayısı gibi somut, sonradan ölçülmüş bir değer olmalı;
+    `yerlesim_skoru()`'nun kendi ürettiği bir sayı DEĞİL (yoksa kalibrasyon
+    döngüsel/anlamsız olur).
+    """
+
+    isim: str
+    ratsnest_mm: float
+    keepout_ihlal_sayisi: int
+    termal_yayilim_skoru: float
+    hs_kompaktlik_skoru: float
+    gercek_kalite_puani: float
+
+
+@dataclass
+class KalibreEdilmisAgirlikSeti:
+    agirlik_ratsnest: float
+    agirlik_keepout: float
+    agirlik_termal: float
+    agirlik_hs_kompaktlik: float
+    kalan_hata_normu: float
+    ornek_sayisi: int
+
+
+MIN_KALIBRASYON_ORNEK_SAYISI = 8
+ONERILEN_KALIBRASYON_ORNEK_SAYISI = 10
+
+
+def skor_agirliklarini_kalibre_et(
+    ornekler: Sequence[GecmisYerlesimOrnegi],
+) -> KalibreEdilmisAgirlikSeti:
+    """`yerlesim_skoru()`'nun dört ağırlığını (ratsnest/keepout/termal/
+    hs-kompaktlık) geçmiş `ornekler`'den KÜÇÜK ÖLÇEKLİ, TAM DETERMİNİSTİK
+    bir doğrusal regresyonla kalibre eder.
+
+    KADEME 2 — bu bir "büyük ML modeli" DEĞİLDİR: `scipy.optimize.nnls`
+    (negatif-olmayan en küçük kareler) ile ham skor bileşenlerinden
+    (X) gerçek kalite puanına (y) en iyi uyan AĞIRLIKLARI bulur — 4
+    bilinmeyenli, kapalı-form, `random` KULLANMAZ; aynı `ornekler`
+    HER ZAMAN aynı ağırlıkları üretir.
+
+    Negatif-olmayan kısıt BİLEREK: `yerlesim_skoru()`'nun kendi
+    yarı-anlamı (her bileşen "ne kadar çok o kadar kötü") negatif bir
+    ağırlıkla ÇELİŞİR — ör. "daha fazla keepout ihlali skoru
+    İYİLEŞTİRİR" gibi fiziksel anlamsız bir sonuç NNLS ile yapısal
+    olarak İMKANSIZ kılınır (sıradan OLS bunu garanti etmez).
+
+    En az `MIN_KALIBRASYON_ORNEK_SAYISI` (8) örnek ZORUNLUDUR — 4
+    bilinmeyen için 4 denklem teorik olarak yeterli ama pratikte aşırı
+    uydurma (overfitting) riski taşır; `ValueError` ile reddedilir.
+    `ONERILEN_KALIBRASYON_ORNEK_SAYISI` (10) altındaki örnek sayıları
+    KABUL edilir ama sonuçtaki `kalan_hata_normu` özellikle dikkatle
+    okunmalı (az örnekte düşük hata normu YANILTICI olabilir).
+
+    SINIR: bu fonksiyon `ornekler`'in KENDİSİNİN temsil gücünü doğrulamaz
+    — 10-20 örnek her zaman "yeterince çeşitli" anlamına gelmez, bu
+    çağıranın sorumluluğundadır (bkz. dosya başlığı FAZ 0.5 #34 notu).
+    """
+    if len(ornekler) < MIN_KALIBRASYON_ORNEK_SAYISI:
+        raise ValueError(
+            f"Kalibrasyon için en az {MIN_KALIBRASYON_ORNEK_SAYISI} geçmiş örnek gerekir, "
+            f"{len(ornekler)} verildi."
+        )
+
+    from scipy.optimize import nnls
+    import numpy as np
+
+    ozellik_matrisi = np.array(
+        [
+            [
+                o.ratsnest_mm,
+                float(o.keepout_ihlal_sayisi),
+                o.termal_yayilim_skoru,
+                o.hs_kompaktlik_skoru,
+            ]
+            for o in ornekler
+        ]
     )
-    return YerlesimSkoru(
-        parametre_seti_ismi=parametre_seti_ismi,
-        toplam_skor=round(toplam, 4),
+    hedef_vektoru = np.array([o.gercek_kalite_puani for o in ornekler])
+
+    agirliklar, kalan_hata_normu = nnls(ozellik_matrisi, hedef_vektoru)
+
+    return KalibreEdilmisAgirlikSeti(
+        agirlik_ratsnest=round(float(agirliklar[0]), 6),
+        agirlik_keepout=round(float(agirliklar[1]), 6),
+        agirlik_termal=round(float(agirliklar[2]), 6),
+        agirlik_hs_kompaktlik=round(float(agirliklar[3]), 6),
+        kalan_hata_normu=round(float(kalan_hata_normu), 6),
+        ornek_sayisi=len(ornekler),
+    )
+
+
+def ornek_yerlesimden_uret(
+    isim: str,
+    sonuc: YerlesimSonucu,
+    netler: Sequence[Net],
+    gercek_kalite_puani: float,
+    komponentler: Sequence[Komponent] = (),
+    keepoutlar: Sequence["YuksekHizKeepout"] = (),
+    termal_kisitlar: Sequence[MesafeKisiti] = (),
+) -> GecmisYerlesimOrnegi:
+    """Gerçek bir `YerlesimSonucu`'ndan (+ dışarıdan sağlanan, GERÇEK/
+    doğrulanmış `gercek_kalite_puani`) bir `GecmisYerlesimOrnegi` üretir —
+    `_skor_bilesenlerini_hesapla()`'yı (yerlesim_skoru()'nun kullandığı
+    AYNI fonksiyon) çağırarak ham bileşenleri çıkarır, elle tekrar
+    hesaplama/kopyalama gerektirmez.
+    """
+    ihlal_sayisi, termal_skoru, hs_kompaktlik = _skor_bilesenlerini_hesapla(
+        sonuc, netler, komponentler, keepoutlar, termal_kisitlar
+    )
+    return GecmisYerlesimOrnegi(
+        isim=isim,
         ratsnest_mm=sonuc.son_ratsnest_mm,
         keepout_ihlal_sayisi=ihlal_sayisi,
         termal_yayilim_skoru=round(termal_skoru, 4),
         hs_kompaktlik_skoru=round(hs_kompaktlik, 4),
+        gercek_kalite_puani=gercek_kalite_puani,
     )
 
 
