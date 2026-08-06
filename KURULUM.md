@@ -126,6 +126,13 @@ commit'lenir (`SKILL-orchestrator` "push öncesi son tarama" maddesiyle aynı
 disiplin: takip edilen bayat üretilmiş dosyalar yeniden üretilmeden push
 edilmemeli).
 
+**Yetenek Envanteri güncellemesi (elle, oturum sonunda):** `python main.py
+envanter-guncelle` — `YETENEK_ENVANTERI.xlsx`'i repo'nun GÜNCEL durumuna
+göre yeniden üretir (`yetenek_envanteri_uret.py`). Bir git hook'una BİLEREK
+BAĞLANMADI (otomatik commit disiplinle çelişir) — Claude Code'un (veya
+kullanıcının) her oturum sonunda, yeni/değişen modüller varsa bunu elle
+çağırıp sonucu ayrı bir commit'e eklemesi gerekir.
+
 ## 10. Görsel Diff Araçları (opsiyonel ama önerilir)
 KiCad dosyaları metin S-Expr olsa da ham diff okunaklı DEĞİLDİR (koordinat
 kayması tüm satırı değiştirir). Görsel PCB/şematik diff için:
