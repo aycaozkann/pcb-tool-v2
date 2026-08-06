@@ -110,6 +110,85 @@ def pytest_fail_erisilmemeli(*a, **k):
     pytest.fail("bu adıma ULAŞILMAMALI — promotion RED olduğu için kanoniğe yazma/commit adımına hiç girilmemeli")
 
 
+def test_cmd_promote_termal_mekanik_fail_kanonik_dosyaya_dokunmaz(monkeypatch, tmp_path):
+    """FAULT-INJECTION: DRC/ERC/verifier/karar hepsi TEMİZ ama scratch'teki
+    `termal_mekanik_veri.json` bir ihlal üretiyor (yüksek güçlü komponent +
+    kasa temas bölgesi + tanımsız B.Mask açıklığı) -> promotion yine RED
+    olmalı, kanonik `projem.kicad_pcb` DEĞİŞMEMELİ. `faz_termal_mekanik`
+    burada GERÇEK (mock'lanmamış) çalışır — asıl kanıtlanan şey budur."""
+    _proje_kur(tmp_path)
+    scratch = scratch_olustur(str(tmp_path), scratch_id="sid1")
+    (scratch / "termal_mekanik_veri.json").write_text(json.dumps({
+        "kritik_guc_esigi_W": 0.5,
+        "komponentler": [
+            {
+                "isim": "U1", "x": 5.0, "y": 5.0, "guc_yayilimi_W": 1.0,
+                "mevcut_termal_via_sayisi": 10,
+                "b_mask_acikligi_tanimli_mi": False, "yuzey_kaplamasi": "TBD",
+            }
+        ],
+        "yuzeyler": [
+            {"isim": "boss1", "poligon": [[0, 0], [10, 0], [10, 10], [0, 10]], "z_boslugu_mm": 0.3}
+        ],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "bagimsiz_dogrulama_calistir", lambda *a, **k: _temiz_dogrulama_ozeti())
+    monkeypatch.setattr(main, "kararlari_yukle", lambda *a, **k: [])
+    monkeypatch.setattr(main, "_otonom_commit_at", lambda *a, **k: pytest_fail_erisilmemeli())
+
+    kod = main.cmd_promote(_args(tmp_path, scratch_id="sid1"))
+
+    assert kod == 1
+    assert (tmp_path / "projem.kicad_pcb").read_text(encoding="utf-8") == "pcb-kanonik-v1"
+    assert not (tmp_path / "DOCS" / "07_Dogrulama").exists()
+
+
+def test_cmd_promote_termal_mekanik_kapsam_yok_engellemez(monkeypatch, tmp_path):
+    """`termal_mekanik_veri.json` yokken `faz_termal_mekanik` KAPSAM_YOK
+    döner ve diğer tüm kapılar temizse promotion BAŞARILI olmalı — KAPSAM_YOK
+    bir red nedeni DEĞİLDİR."""
+    _proje_kur(tmp_path)
+    scratch = scratch_olustur(str(tmp_path), scratch_id="sid1")
+    (scratch / "projem.kicad_pcb").write_text("pcb-scratch-v2", encoding="utf-8")
+    _tum_kapilari_ac(monkeypatch)
+
+    kod = main.cmd_promote(_args(tmp_path, scratch_id="sid1"))
+
+    assert kod == 0
+    assert (tmp_path / "projem.kicad_pcb").read_text(encoding="utf-8") == "pcb-scratch-v2"
+
+
+def test_cmd_promote_yerlesim_cakisma_fail_kanonik_dosyaya_dokunmaz(monkeypatch, tmp_path):
+    """FAULT-INJECTION: DRC/ERC/verifier/karar/termal hepsi TEMİZ ama
+    scratch'teki `yerlesim_veri.json` iki sabit komponenti kasıtlı olarak
+    çakışacak şekilde tanımlıyor -> `cakisma_kontrolu` FAIL -> promotion
+    yine RED olmalı, kanonik `projem.kicad_pcb` DEĞİŞMEMELİ."""
+    _proje_kur(tmp_path)
+    scratch = scratch_olustur(str(tmp_path), scratch_id="sid1")
+    (scratch / "yerlesim_veri.json").write_text(json.dumps({
+        "kart_genisligi_mm": 40.0, "kart_yuksekligi_mm": 40.0,
+        "komponentler": [
+            {"ref": "U1", "genislik_mm": 5.0, "yukseklik_mm": 5.0, "sabit": True, "x": 20.0, "y": 20.0},
+            {"ref": "U2", "genislik_mm": 5.0, "yukseklik_mm": 5.0, "sabit": True, "x": 20.0, "y": 20.0},
+        ],
+        "netler": [], "kisitlar": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(main, "faz_sematik", lambda *a, **k: True)
+    monkeypatch.setattr(main, "faz_drc", lambda *a, **k: True)
+    monkeypatch.setattr(main, "bagimsiz_dogrulama_calistir", lambda *a, **k: _temiz_dogrulama_ozeti())
+    monkeypatch.setattr(main, "kararlari_yukle", lambda *a, **k: [])
+    monkeypatch.setattr(main, "_otonom_commit_at", lambda *a, **k: pytest_fail_erisilmemeli())
+
+    kod = main.cmd_promote(_args(tmp_path, scratch_id="sid1"))
+
+    assert kod == 1
+    assert (tmp_path / "projem.kicad_pcb").read_text(encoding="utf-8") == "pcb-kanonik-v1"
+    assert not (tmp_path / "DOCS" / "07_Dogrulama").exists()
+
+
 def test_cmd_promote_erc_fail_kanonik_dosyaya_dokunmaz(monkeypatch, tmp_path):
     _proje_kur(tmp_path)
     scratch = scratch_olustur(str(tmp_path), scratch_id="sid1")
