@@ -13,7 +13,9 @@ fail-closed dahil).
 
 import argparse
 import json
+import sys
 from pathlib import Path
+from typing import List
 
 import pytest
 
@@ -810,3 +812,189 @@ def test_cmd_anahat_degisti_yeniden_yerlestir_degisince_oncekinden_devam_eder(tm
     assert kod == 0
     assert yakalanan["baslangic_koordinatlari"]
     assert set(yakalanan["baslangic_koordinatlari"].keys()) == {"U1", "U2"}
+
+
+# ------------------------------------------------------------------
+# 5. cmd_coklu_kart_dogrula — coklu_kart_sozlesme_kontrolu.py CLI köprüsü
+# ------------------------------------------------------------------
+#
+# FAZ 0.5 #36/#37 mutabakat turunda bulunan boşluk: coklu_kart_sozlesme_
+# kontrolu.py'nin KENDİ testleri (test_coklu_kart_sozlesme_kontrolu.py)
+# vardı ama main.py'nin CLI sarmalayıcısı (`cmd_coklu_kart_dogrula`) HİÇ
+# test edilmemişti — `cmd_sistem_atama_plani_uret`'in AYNI mocking
+# desenini (`sys.modules["pcbnew"]`'e taklit modül) kullanır.
+
+class _SahtePad:
+    def __init__(self, numara: str, net: str):
+        self._numara = numara
+        self._net = net
+
+    def GetNumber(self) -> str:
+        return self._numara
+
+    def GetNetname(self) -> str:
+        return self._net
+
+
+class _SahteFootprint:
+    def __init__(self, ref: str, padlar: List[_SahtePad]):
+        self._ref = ref
+        self._padlar = padlar
+
+    def GetReference(self) -> str:
+        return self._ref
+
+    def Pads(self) -> List[_SahtePad]:
+        return self._padlar
+
+
+class _SahteBoard:
+    def __init__(self, footprints: List[_SahteFootprint]):
+        self._footprints = footprints
+
+    def GetFootprints(self):
+        return self._footprints
+
+
+class _TaklitPcbnewModulu:
+    def __init__(self, board: _SahteBoard):
+        self._board = board
+
+    def LoadBoard(self, yol: str) -> _SahteBoard:
+        return self._board
+
+
+@pytest.fixture(autouse=True)
+def _pcbnew_taklidini_temizle():
+    orijinal = sys.modules.get("pcbnew")
+    yield
+    if orijinal is None:
+        sys.modules.pop("pcbnew", None)
+    else:
+        sys.modules["pcbnew"] = orijinal
+
+
+def _sozlesme_yaz(tmp_path, guc_giris_maks_a=6.0):
+    import yaml
+
+    sozlesme = tmp_path / "arayuz_sozlesmesi.yaml"
+    sozlesme.write_text(yaml.safe_dump({
+        "versiyon": 1,
+        "konnektor": {
+            "pin_sayisi": 2,
+            "kamera_karti_referans": "J1",
+            "ana_kart_referans_sablonu": "J{kart}",
+            "pinler": [
+                {"no": 1, "net": "MIPI_D0_P", "yon": "giris"},
+                {"no": 2, "net": "MIPI_D0_N", "yon": "giris"},
+            ],
+        },
+        "guc_butcesi": {
+            "kart_basi_maks_akim_a": 0.5, "kart_sayisi": 6,
+            "ana_kart_giris_marj_yuzde": 20.0,
+            "ana_kart_guc_girisi_maks_a": guc_giris_maks_a,
+        },
+        "vc_id": {"aralik": [0, 5], "atama": {f"kart_{i}": i - 1 for i in range(1, 7)}},
+    }), encoding="utf-8")
+    return sozlesme
+
+
+def _kamera_board(pinler_tutarli=True):
+    net_1 = "MIPI_D0_P" if pinler_tutarli else "YANLIS_NET"
+    return _SahteBoard([_SahteFootprint("J1", [_SahtePad("1", net_1), _SahtePad("2", "MIPI_D0_N")])])
+
+
+def _ana_kart_board():
+    fps = [
+        _SahteFootprint(f"J{i}", [_SahtePad("1", "MIPI_D0_P"), _SahtePad("2", "MIPI_D0_N")])
+        for i in range(1, 7)
+    ]
+    return _SahteBoard(fps)
+
+
+def _coklu_kart_args(tmp_path, sozlesme, karar_proje_dir=None):
+    argv = [
+        "coklu-kart-dogrula",
+        "--sozlesme", str(sozlesme),
+        "--kamera-karti", str(tmp_path / "kamera.kicad_pcb"),
+        "--ana-kart", str(tmp_path / "ana_kart.kicad_pcb"),
+    ]
+    if karar_proje_dir:
+        argv += ["--karar-proje-dir", str(karar_proje_dir)]
+    return main.build_parser().parse_args(argv)
+
+
+def test_coklu_kart_dogrula_tutarli_boardlar_pass(tmp_path, capsys):
+    sozlesme = _sozlesme_yaz(tmp_path)
+    sys.modules["pcbnew"] = _TaklitPcbnewModulu(_kamera_board(pinler_tutarli=True))
+    # NOT: kamera + ana kart AYNI mock board üzerinden LoadBoard() çağrılır
+    # (gerçek CLI'da iki AYRI dosya/board olur) — burada tek bir taklit
+    # board içine HEM J1 (kamera) HEM J1..J6 (ana kart) footprint'lerini
+    # koyup TEK board ile ikisini de karşılıyoruz (LoadBoard yol argümanını
+    # AYIRT ETMEZ, bu CLI-sarmalayıcı testinin kapsamı dışında — pin-bazlı
+    # ayrım mantığı zaten test_coklu_kart_sozlesme_kontrolu.py'de kanıtlı).
+    birlesik = _SahteBoard(_kamera_board(True)._footprints + _ana_kart_board()._footprints)
+    sys.modules["pcbnew"] = _TaklitPcbnewModulu(birlesik)
+
+    kod = main.cmd_coklu_kart_dogrula(_coklu_kart_args(tmp_path, sozlesme))
+
+    cikti = capsys.readouterr().out
+    assert kod == 0
+    assert "SONUÇ: PASS" in cikti
+
+
+def test_coklu_kart_dogrula_pin_uyumsuzlugu_fail(tmp_path, capsys):
+    sozlesme = _sozlesme_yaz(tmp_path)
+    birlesik = _SahteBoard(_kamera_board(pinler_tutarli=False)._footprints + _ana_kart_board()._footprints)
+    sys.modules["pcbnew"] = _TaklitPcbnewModulu(birlesik)
+
+    kod = main.cmd_coklu_kart_dogrula(_coklu_kart_args(tmp_path, sozlesme))
+
+    cikti = capsys.readouterr().out
+    assert kod == 1
+    assert "SONUÇ: FAIL" in cikti
+
+
+def test_coklu_kart_dogrula_guc_butcesi_asimi_fail(tmp_path, capsys):
+    # ana kart giriş sınırı BİLEREK çok düşük -> güç bütçesi kontrolü FAIL
+    sozlesme = _sozlesme_yaz(tmp_path, guc_giris_maks_a=0.1)
+    birlesik = _SahteBoard(_kamera_board(True)._footprints + _ana_kart_board()._footprints)
+    sys.modules["pcbnew"] = _TaklitPcbnewModulu(birlesik)
+
+    kod = main.cmd_coklu_kart_dogrula(_coklu_kart_args(tmp_path, sozlesme))
+
+    assert kod == 1
+
+
+def test_coklu_kart_dogrula_karar_proje_dir_verilirse_karar_birimleri_json_yazilir(tmp_path):
+    sozlesme = _sozlesme_yaz(tmp_path)
+    birlesik = _SahteBoard(_kamera_board(True)._footprints + _ana_kart_board()._footprints)
+    sys.modules["pcbnew"] = _TaklitPcbnewModulu(birlesik)
+    proje_dir = tmp_path / "proje"
+    proje_dir.mkdir()
+
+    kod = main.cmd_coklu_kart_dogrula(_coklu_kart_args(tmp_path, sozlesme, karar_proje_dir=proje_dir))
+
+    assert kod == 0
+    karar_json = proje_dir / "DOCS" / "karar_birimleri.json"
+    assert karar_json.exists()
+    veri = json.loads(karar_json.read_text(encoding="utf-8"))
+    kararlar = veri if isinstance(veri, list) else veri.get("kararlar", veri)
+    assert any(
+        (k.get("karar_id") == "coklu-kart-arayuz-tutarli") and (k.get("durum") == "KABUL_EDILDI")
+        for k in (kararlar if isinstance(kararlar, list) else kararlar.values())
+    )
+
+
+def test_coklu_kart_dogrula_bos_board_kapsam_yok_fail(tmp_path, capsys):
+    """Konnektör hiç bulunamazsa (KAPSAM_YOK) bu PASS SAYILMAZ — dosya
+    başlığındaki 'taranan==0 asla PASS değildir' disiplininin CLI'dan
+    da bozulmadığının kanıtı."""
+    sozlesme = _sozlesme_yaz(tmp_path)
+    sys.modules["pcbnew"] = _TaklitPcbnewModulu(_SahteBoard([]))
+
+    kod = main.cmd_coklu_kart_dogrula(_coklu_kart_args(tmp_path, sozlesme))
+
+    cikti = capsys.readouterr().out
+    assert kod == 1
+    assert "KAPSAM_YOK" in cikti

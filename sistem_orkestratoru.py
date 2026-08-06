@@ -53,6 +53,22 @@ seçilebiliyor, hangi pinle) NDA'lı datasheet'te — bu modül şimdilik
 sozlesmeye_birlestir()` bu ortamda GERÇEKTEN test edildi (`test_sistem_
 orkestratoru.py`, pyyaml zaten bu projede kurulu) — pcbnew/donanım
 GEREKTİRMEZ, saf veri/YAML dönüşümüdür.
+
+FAZ 0.5 #36/#37 MUTABAKAT NOTU (2026-08-06): orijinal görev tanımındaki
+`N_kopya_uret()` (#37 — TEK doğrulanmış bir board'u N kopyaya, HER birine
+FARKLI kanal/adres ataması ile şablonlama) bu modülün YUKARIDAKİ mimari
+kararıyla ARTIK GEREKSİZDİR: kamera kartları birbirinden ELEKTRİKSEL
+OLARAK farksızdır (`sensor_sabit_i2c_adresi` TÜM kartlarda AYNI kalır),
+farklılaşan tek şey bu dosyanın ürettiği DESERIALIZER kanal/adres-çevirisi
+planıdır — bu plan ANA KART tarafında (register config, host yazılımı)
+tüketilir, kamera kartı `.kicad_pcb`'sinde HİÇBİR fiziksel/elektriksel
+fark GEREKTİRMEZ. Yani "N farklı board kopyası üret" ihtiyacı yoktur;
+tek bir kamera kartı tasarımı ZATEN N kez (değişiklik olmadan) üretilebilir.
+`coklu_kart_sozlesme_kontrolu.py` (konnektör pin-bazlı doğrulama + VC-ID
+çakışma + güç bütçesi) ile birlikte FAZ 0.5 #36'nın ("N .kicad_pcb'yi tek
+sistem sözleşmesi altında ilişkilendirme + konnektör hizalama + kartlar
+arası güç bütçesi") kapsamı BURADA + `main.py::cmd_coklu_kart_dogrula`/
+`cmd_sistem_atama_plani_uret` CLI köprüleriyle karşılanmış sayılır.
 """
 
 from __future__ import annotations
