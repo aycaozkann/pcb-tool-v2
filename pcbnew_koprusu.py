@@ -70,6 +70,28 @@ def _xy_mm(nokta) -> Tuple[float, float]:
 #    (pcb_highspeed_escape.py'nin girdisini elle doldurmak yerine)
 # ------------------------------------------------------------------
 
+def _pcbnew_veya_kapsam_yok(board_path: str, kontrol_adi: str) -> Tuple[Any, Any, Optional[Bulgu]]:
+    """`board_path`'i `pcbnew` ile yüklemeyi dener. `pcbnew` bu ortamda
+    KURULU DEĞİLSE (`ImportError`/`ModuleNotFoundError`) exception
+    FIRLATMAZ — çağıran `*_kontrolu()` fonksiyonuna özel bir KAPSAM_YOK
+    `Bulgu` üretir (2026-08-03, Madde 5: "sessiz crash yerine KAPSAM_YOK").
+    Dönen üçlü: BAŞARILIYSA `(pcbnew_modulu, board, None)`; pcbnew yoksa
+    `(None, None, Bulgu)` — çağıran `if kapsam_yok is not None: return kapsam_yok`
+    ile tek satırda erken çıkar.
+    """
+    try:
+        import pcbnew
+    except ImportError as hata:
+        return None, None, bulgu_uret(
+            kontrol_adi, taranan=0, detay=(
+                f"pcbnew modülü bulunamadı ({hata}) — bu kontrol KiCad'in gömülü "
+                "Python'unda (`C:\\Program Files\\KiCad\\10.0\\bin\\python.exe` "
+                "benzeri) çalıştırılmalı; sessizce PASS/çökme yerine KAPSAM_YOK raporlandı."
+            ),
+        )
+    return pcbnew, pcbnew.LoadBoard(board_path), None
+
+
 def kanal_ciftlerini_bul(board, arama_mm: float = 3.0) -> List[Dict[str, Any]]:
     """Bakır boşluğu (0, arama_mm] arasında kalan komşu pad çiftlerini bulur
     ve her biri için `pcb_highspeed_escape.PinArasiKanal`'ı OTOMATİK üretir.
@@ -202,20 +224,101 @@ def gercek_boarddan_maske_baraji_kontrolu(
 
 
 # ------------------------------------------------------------------
+# 1b. TEK BİR NET'İN İZ/VIA GEOMETRİSİNİ TOPLA (ortak yardımcı —
+#     başka köprüler bunu TEKRAR YAZMAK yerine ÇAĞIRMALI)
+# ------------------------------------------------------------------
+
+def net_iz_ve_via_listesi_topla(board, net_adi: str) -> Dict[str, List[Dict[str, Any]]]:
+    """`net_adi`'na ait TÜM iz segmentlerini ve via'ları toplar.
+
+    NEDEN BU FONKSİYON VAR: `openems_koprusu.py::geometri_cikar()` gibi
+    başka köprülerin de bir net'in gerçek board geometrisine (SI/EM
+    simülasyonu, akım yoğunluğu haritası vb. için) ihtiyacı var —
+    `board.GetTracks()` üzerinde YENİ bir döngü yazmak yerine bu ortak
+    yardımcıya bağlanmalılar (`kanal_ciftlerini_bul` ile AYNI "gerçek
+    board'dan otomatik çıkarım" felsefesi).
+
+    TUZAK (a) — bkz. dosya başlığı: `track.GetClass() == "PCB_TRACK"`
+    YAYLARI (`PCB_ARC`) ATLAR; bu fonksiyon HER İKİSİNİ de "izler" listesine
+    dahil eder (bir diferansiyel çift bükümlü/yay geçişli olabilir, yay
+    segmentini atlamak geometriyi EKSİK çıkarır).
+
+    Döner: `{"izler": [{"baslangic_mm", "bitis_mm", "genislik_mm",
+    "katman"}, ...], "vialar": [{"konum_mm", "cap_mm", "ust_katman",
+    "alt_katman"}, ...]}` — tümü mm/pcbnew katman kimliği (int), string
+    katman adına GÜVENİLMEZ (tuzak (c))."""
+    izler: List[Dict[str, Any]] = []
+    vialar: List[Dict[str, Any]] = []
+    for t in board.GetTracks():
+        if t.GetNetname() != net_adi:
+            continue
+        sinif = t.GetClass()
+        if sinif == "PCB_VIA":
+            vialar.append({
+                "konum_mm": _xy_mm(t.GetPosition()),
+                # TUZAK (d, DOCS/10 D1.6): PCB_VIA.GetWidth() KATMAN
+                # ARGÜMANI OLMADAN çağrılmaz (KiCad 10'da debug assert).
+                "cap_mm": _mm(t.GetWidth(t.TopLayer())),
+                "ust_katman": t.TopLayer(),
+                "alt_katman": t.BottomLayer(),
+            })
+        elif sinif in ("PCB_TRACK", "PCB_ARC"):
+            izler.append({
+                "baslangic_mm": _xy_mm(t.GetStart()),
+                "bitis_mm": _xy_mm(t.GetEnd()),
+                "genislik_mm": _mm(t.GetWidth()),
+                "katman": t.GetLayer(),
+            })
+    return {"izler": izler, "vialar": vialar}
+
+
+# ------------------------------------------------------------------
 # 2. VIA-IN-PAD (IPC-4761 Type VII gerektirir)
 # ------------------------------------------------------------------
 
-def via_in_pad_kontrolu(board_path: str) -> Bulgu:
+def via_in_pad_kontrolu(
+    board_path: str,
+    via_siniflandirma_haritasi: Optional[Dict[Tuple[float, float], bool]] = None,
+    konum_toleransi_mm: float = 0.01,
+) -> Bulgu:
     """Her via'nın bir SMD/konnektör pad'inin içinde kalıp kalmadığını
     kontrol eder. Bulunan her via-in-pad, fab notunda IPC-4761 Type VII
     (dolgu+kapak) olarak belirtilmelidir — Type IV/V (tented/plugged)
-    YETERSİZDİR ([[SKILL-dfm]] §Via-in-pad)."""
-    import pcbnew
+    YETERSİZDİR ([[SKILL-dfm]] §Via-in-pad).
 
-    board = pcbnew.LoadBoard(board_path)
+    GENİŞLETME (2026-08-04, `via_siniflandirma.py` ile birlikte —
+    ESKİ ÇAĞRI ŞEKLİ (`via_in_pad_kontrolu(board_path)`) DAVRANIŞ
+    DEĞİŞTİRMEDEN çalışmaya devam eder, tespit mantığı BOZULMADI):
+
+    `via_siniflandirma_haritasi` verilirse — tasarım-anında
+    `via_siniflandirma.py::select_via_type_for_bga()` ile üretilen
+    `Via` nesnelerinin `dolgu_ve_kapak_var_mi` alanını via KONUMUNA
+    (mm, `konum_toleransi_mm` içinde) göre bu haritadan okur:
+      - Harita bu konum için `True` diyorsa (bilinçli, IPC-4761 Type VII
+        ile tasarlanmış via-in-pad) -> bulgu listesine EKLENMEZ (doğru
+        pratik, gerçek bir DRC hatası DEĞİL).
+      - Harita bu konum için `False` diyorsa YA DA haritada konum hiç
+        YOKSA (sınıflandırma bilgisi eksik/bilinmiyor) -> ESKİ davranış
+        korunur: ihlal listesine eklenir (gerçek DRC hatası, sadece
+        "fab notunda belirtilmeli" tavsiyesi DEĞİL — `bulgu_uret` zaten
+        `ihlaller` boş değilse `FAIL` döndürüyor, bu satır DEĞİŞMEDİ).
+    Harita hiç verilmezse (`None`, varsayılan) davranış ESKİYLE BİREBİR
+    aynıdır — geriye dönük uyumluluk korunur.
+    """
+    pcbnew, board, kapsam_yok = _pcbnew_veya_kapsam_yok(board_path, "via_in_pad")
+    if kapsam_yok is not None:
+        return kapsam_yok
     vialar = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
     pads = [(fp, p) for fp in board.GetFootprints() for p in fp.Pads()
             if p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)]
+
+    def _dolgu_kapak_biliniyor_mu(via_mm: Tuple[float, float]) -> Optional[bool]:
+        if via_siniflandirma_haritasi is None:
+            return None
+        for (kx, ky), deger in via_siniflandirma_haritasi.items():
+            if abs(kx - via_mm[0]) <= konum_toleransi_mm and abs(ky - via_mm[1]) <= konum_toleransi_mm:
+                return deger
+        return None
 
     ihlaller: List[Dict[str, Any]] = []
     for v in vialar:
@@ -225,17 +328,24 @@ def via_in_pad_kontrolu(board_path: str) -> Bulgu:
                 continue
             layer = v.TopLayer() if p.IsOnLayer(v.TopLayer()) else v.BottomLayer()
             if p.GetEffectivePolygon(layer).Collide(vp):
+                via_mm = _xy_mm(vp)
+                dolgu_kapak = _dolgu_kapak_biliniyor_mu(via_mm)
+                if dolgu_kapak is True:
+                    break  # IPC-4761 Type VII olarak tasarlanmış — ihlal DEĞİL
                 ihlaller.append({
-                    "via_mm": _xy_mm(vp),
+                    "via_mm": via_mm,
                     "pad": f"{fp.GetReference()}.{p.GetNumber()}",
                     "net": v.GetNetname(),
+                    "dolgu_ve_kapak_biliniyor_mu": dolgu_kapak,  # None=bilinmiyor, False=yok
                 })
                 break
 
     return bulgu_uret(
         "via_in_pad", len(vialar), ihlaller,
         "Bulunan her via-in-pad fab notunda IPC-4761 Type VII "
-        "(dolgu+kapak, dimple ≤25µm) olarak belirtilmeli.",
+        "(dolgu+kapak, dimple ≤25µm) olarak belirtilmeli. Sınıflandırma "
+        "haritasında dolgu+kapak=True olarak işaretli via'lar zaten doğru "
+        "tasarlanmış sayılır ve bu listeye dahil edilmez.",
     )
 
 
@@ -250,9 +360,9 @@ def annular_ring_kontrolu(board_path: str, min_mm: float = 0.15) -> Bulgu:
     TUZAK (d): karşılaştırma TAM SAYI nm ile yapılır — float mm'de
     (0.7-0.4)/2 = 0.14999999999999997 çıkıp tam sınırdaki pad'i yanlışlıkla
     ihlal sayabilir."""
-    import pcbnew
-
-    board = pcbnew.LoadBoard(board_path)
+    pcbnew, board, kapsam_yok = _pcbnew_veya_kapsam_yok(board_path, "annular_ring")
+    if kapsam_yok is not None:
+        return kapsam_yok
     limit_nm = int(round(min_mm * NM_PER_MM))
 
     taranan, ihlaller = 0, []
@@ -320,9 +430,9 @@ def kenar_keepout_seramik_kontrolu(board_path: str, keepout_mm: float = 2.0) -> 
     TUZAK (b): `footprint.GetBoundingBox()` yerine parçanın MERKEZ
     konumu kullanılıyor (referans/değer ipek metnini dahil etme riskini
     baştan eler)."""
-    import pcbnew
-
-    board = pcbnew.LoadBoard(board_path)
+    pcbnew, board, kapsam_yok = _pcbnew_veya_kapsam_yok(board_path, "kenar_keepout_seramik")
+    if kapsam_yok is not None:
+        return kapsam_yok
     kenar = _kart_kenari_noktalari(board)
     if not kenar:
         return bulgu_uret("kenar_keepout_seramik", 0, [], "Edge.Cuts bulunamadı")
@@ -386,9 +496,9 @@ def stitch_yogunlugu_kontrolu(
     otomatik hesaplanmaz. GND via YOKSA (referans noktası yok) KAPSAM_YOK
     döner — "via yok, o yüzden ihlal de yok" YANLIŞ bir PASS olurdu.
     """
-    import pcbnew
-
-    board = pcbnew.LoadBoard(board_path)
+    pcbnew, board, kapsam_yok = _pcbnew_veya_kapsam_yok(board_path, "stitch_yogunlugu")
+    if kapsam_yok is not None:
+        return kapsam_yok
     hedef_mm = _lambda_20_hedef_mm(f_diz_ghz, er_eff)
     rx = re.compile(gnd_net_regex)
     tum_vialar = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
@@ -464,6 +574,149 @@ def stitch_yogunlugu_kontrolu(
 
 
 
+# ------------------------------------------------------------------
+# 5b. DEKUPLAJ KAPASİTÖR MESAFESİ (fiziksel-koordinat kontrolü)
+# ------------------------------------------------------------------
+#
+# NOT: `pcb_stackup_planner.py::dekuplaj_kontrolu()` ŞEMATİK-SEVİYESİ bir
+# kontroldür — `Komponent.guc_pini_sayisi` vs `dekuplaj_kapasitor_sayisi`
+# SAYI karşılaştırması, "kaç tane var" sorusuna cevap verir. BU fonksiyon
+# ONUN YERİNE DEĞİL, YANINA eklenmiştir — TAMAMLAYICI bir katman: gerçek
+# board koordinatlarına bakıp "var ama YETERİNCE YAKIN MI" sorusuna cevap
+# verir. Sayı doğru olsa bile bir kapasitör IC'den 20mm uzakta yerleştirilmiş
+# olabilir — sayı kontrolü bunu YAKALAYAMAZ, sadece bu kontrol yakalar.
+
+# IC paket ailesi işaretleri — footprint kütüphane kimliğinde (ör.
+# "Package_QFN:QFN-36-1EP_5x6mm...") ARANIR. Bilinçli olarak geniş tutuldu
+# (SOIC/TSSOP/SOT gibi `pcb_stackup_planner.KilifTuru`'nda YOKTUR ama
+# gerçek board'larda LDO/ESD/choke gibi IC'ler bu paketlerdedir) — sadece
+# "QFN/BGA" ile sınırlı kalmak gerçek IC'lerin çoğunu KAÇIRIRDI.
+_IC_PAKET_IMZALARI = ("QFN", "BGA", "SOIC", "SSOP", "TSSOP", "LQFP", "QFP", "DFN", "SON")
+# SOT ailesi hem 3-pinli basit transistörlerde hem 5/6-pinli LDO/ESD gibi
+# gerçek IC'lerde kullanılır — pad sayısıyla ayrıştırılır (bkz. altta).
+_SOT_IMZASI = "SOT"
+_SOT_MIN_PAD_IC_SAYILIR = 5
+
+_GUC_PINI_NET_DESENLERI = (
+    "VCC", "VDD", "3V3", "3.3V", "+3V3", "+3.3V", "5V", "+5V", "1V8", "+1V8",
+    "1V2", "+1V2", "AVDD", "DVDD", "VBAT", "VBUS", "VIN",
+)
+
+_DEKUPLAJ_DEGER_ARALIGI_F = (47e-9, 220e-9)  # 47nF - 220nF (100nF hedefine yakın aralık)
+
+_KAPASITANS_BIRIM_CARPANI = {
+    "p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "f": 1.0,
+}
+
+
+def _footprint_ic_mi(fp_kutuphane_id: str, pad_sayisi: int) -> bool:
+    ad = fp_kutuphane_id.upper()
+    if any(imza in ad for imza in _IC_PAKET_IMZALARI):
+        return True
+    if _SOT_IMZASI in ad and pad_sayisi >= _SOT_MIN_PAD_IC_SAYILIR:
+        return True
+    return False
+
+
+def _guc_pini_mi(net_isim: str) -> bool:
+    ad = net_isim.strip().upper()
+    if not ad:
+        return False
+    parcalar = ad.replace("+", "").split("_")
+    return any(p == d.replace("+", "") for d in _GUC_PINI_NET_DESENLERI for p in parcalar)
+
+
+def _kapasitans_degeri_parse_et(deger_str: str) -> Optional[float]:
+    """'100nF', '0.1uF', '100n', '22pF' gibi KiCad değer string'lerini
+    Farad cinsinden float'a çevirir. Parse edilemezse `None` döner
+    (uydurma bir değer ÜRETİLMEZ — çağıran bu kapasitörü aday listesinden
+    ELER)."""
+    eslesme = re.match(r"^\s*([0-9]*\.?[0-9]+)\s*([pnuµm]?)F?\s*$", deger_str, re.I)
+    if not eslesme:
+        return None
+    sayi = float(eslesme.group(1))
+    birim = eslesme.group(2).lower()
+    carpan = _KAPASITANS_BIRIM_CARPANI.get(birim, 1.0)
+    return sayi * carpan
+
+
+def dekuplaj_mesafe_kontrolu(board_path: str, maks_mesafe_mm: float = 3.0) -> Bulgu:
+    """Her IC güç pini için en yakın UYGUN (47-220nF aralığında) dekuplaj
+    kapasitörünün merkez-merkez mesafesini GERÇEK board koordinatlarından
+    ölçer. `maks_mesafe_mm` (varsayılan 3mm) aşılırsa, VEYA hiç uygun aday
+    kapasitör bulunamazsa (bu İKİSİ AYRI ihlal türü olarak raporlanır),
+    ihlal listesine eklenir.
+
+    Mesafe aşılırsa parazit ve ani-akım-kaynaklı resetlenme riski artar.
+    """
+    pcbnew, board, kapsam_yok = _pcbnew_veya_kapsam_yok(board_path, "dekuplaj_mesafesi")
+    if kapsam_yok is not None:
+        return kapsam_yok
+
+    kapasitor_adaylari: List[Dict[str, Any]] = []
+    for fp in board.GetFootprints():
+        fp_id = str(fp.GetFPID().GetLibItemName()) if hasattr(fp, "GetFPID") else ""
+        if not fp_id.upper().startswith("C_") and not fp.GetReference().upper().startswith("C"):
+            continue
+        deger_f = _kapasitans_degeri_parse_et(fp.GetValue())
+        if deger_f is None:
+            continue
+        if not (_DEKUPLAJ_DEGER_ARALIGI_F[0] <= deger_f <= _DEKUPLAJ_DEGER_ARALIGI_F[1]):
+            continue
+        kapasitor_adaylari.append({
+            "ref": fp.GetReference(),
+            "konum_mm": _xy_mm(fp.GetPosition()),
+            "deger_f": deger_f,
+        })
+
+    taranan = 0
+    ihlaller: List[Dict[str, Any]] = []
+    for fp in board.GetFootprints():
+        fp_id = str(fp.GetFPID().GetLibItemName()) if hasattr(fp, "GetFPID") else ""
+        pad_sayisi = len(fp.Pads())
+        if not _footprint_ic_mi(fp_id, pad_sayisi):
+            continue
+        for p in fp.Pads():
+            net_isim = p.GetNetname()
+            if not _guc_pini_mi(net_isim):
+                continue
+            taranan += 1
+            pin_konumu = _xy_mm(p.GetPosition())
+            pin_etiketi = f"{fp.GetReference()}.{p.GetNumber()}"
+
+            if not kapasitor_adaylari:
+                ihlaller.append({
+                    "tur": "kapasitor_yok",
+                    "pin": pin_etiketi, "net": net_isim, "pin_konum_mm": pin_konumu,
+                    "detay": "Board'da 47-220nF aralığında hiç dekuplaj kapasitörü bulunamadı.",
+                })
+                continue
+
+            en_yakin = min(
+                kapasitor_adaylari,
+                key=lambda k: math.hypot(k["konum_mm"][0] - pin_konumu[0],
+                                          k["konum_mm"][1] - pin_konumu[1]),
+            )
+            mesafe_mm = round(math.hypot(
+                en_yakin["konum_mm"][0] - pin_konumu[0],
+                en_yakin["konum_mm"][1] - pin_konumu[1],
+            ), 4)
+            if mesafe_mm > maks_mesafe_mm:
+                ihlaller.append({
+                    "tur": "kapasitor_uzak",
+                    "pin": pin_etiketi, "net": net_isim, "pin_konum_mm": pin_konumu,
+                    "en_yakin_kapasitor": en_yakin["ref"],
+                    "en_yakin_kapasitor_konum_mm": en_yakin["konum_mm"],
+                    "mesafe_mm": mesafe_mm, "sinir_mm": maks_mesafe_mm,
+                })
+
+    return bulgu_uret(
+        "dekuplaj_mesafesi", taranan, ihlaller,
+        f"Sınır: {maks_mesafe_mm}mm (datasheet'lerde tipik önerilen üst sınır). "
+        "Mesafe aşılırsa parazit ve ani-akım-kaynaklı resetlenme riski artar. "
+        f"Board'da bulunan uygun (47-220nF) dekuplaj kapasitörü adayı: {len(kapasitor_adaylari)}.",
+    )
+
 
 # ------------------------------------------------------------------
 # 6. Tüm gerçek-board kontrollerini tek seferde çalıştır
@@ -476,6 +729,7 @@ def tum_gercek_board_kontrollerini_calistir(
     edge_keepout_mm: float = 2.0,
     f_diz_ghz: float = 5.0,
     er_eff: float = 4.5,
+    dekuplaj_maks_mesafe_mm: float = 3.0,
 ) -> List[Bulgu]:
     """CLAUDE.md akışının 5. adımına (doğrulama kapısı) eklenecek gerçek-board
     kontrolleri. `bulgu_sozlesmesi.ozet_rapor()` ile JSON'a çevrilebilir."""
@@ -485,6 +739,7 @@ def tum_gercek_board_kontrollerini_calistir(
         annular_ring_kontrolu(board_path, annular_min_mm),
         kenar_keepout_seramik_kontrolu(board_path, edge_keepout_mm),
         stitch_yogunlugu_kontrolu(board_path, f_diz_ghz, er_eff),
+        dekuplaj_mesafe_kontrolu(board_path, dekuplaj_maks_mesafe_mm),
     ]
 
 

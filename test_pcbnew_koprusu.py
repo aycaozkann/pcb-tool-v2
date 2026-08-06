@@ -32,7 +32,9 @@ import pcbnew_koprusu
 from pcbnew_koprusu import (
     gercek_boarddan_maske_baraji_kontrolu,
     kanal_ciftlerini_bul,
+    net_iz_ve_via_listesi_topla,
     stitch_yogunlugu_kontrolu,
+    via_in_pad_kontrolu,
 )
 from pcb_highspeed_escape import kanal_genisligi_hesapla_mm
 
@@ -101,6 +103,22 @@ class SahteCizim:
         poly._outlines = [self._noktalar]
 
 
+class SahtePolygonAlan:
+    """`PAD.GetEffectivePolygon(layer)` taklidi — sadece `Collide(nokta)`
+    gerektiren via-in-pad testi için, dikdörtgen pad alanı yaklaşımı."""
+
+    def __init__(self, merkez: SahteNokta, boy_x_nm: int, boy_y_nm: int):
+        self._merkez = merkez
+        self._yarim_x = boy_x_nm / 2.0
+        self._yarim_y = boy_y_nm / 2.0
+
+    def Collide(self, nokta: SahteNokta) -> bool:
+        return (
+            abs(nokta.x - self._merkez.x) <= self._yarim_x
+            and abs(nokta.y - self._merkez.y) <= self._yarim_y
+        )
+
+
 class SahtePad:
     def __init__(
         self,
@@ -111,6 +129,9 @@ class SahtePad:
         boy_y_mm: float,
         npth: bool = False,
         mask_exp_mm: float = 0.05,
+        attribute: str = "SMD",
+        katmanlar: Optional[List[int]] = None,
+        net: str = "",
     ):
         self._numara = numara
         self._konum = SahteNokta(x_mm, y_mm)
@@ -118,9 +139,18 @@ class SahtePad:
         self._boy_y = int(round(boy_y_mm * NM_PER_MM))
         self._npth = npth
         self._mask_exp = int(round(mask_exp_mm * NM_PER_MM))
+        self._attribute = "NPTH" if npth else attribute
+        # None -> her katmanda var sayılır (via_in_pad testleri için yeterli
+        # basitleştirme; annular_ring/maske_baraji testleri katman ayrımına
+        # bakmıyor, mevcut davranış BOZULMADI).
+        self._katmanlar = katmanlar
+        self._net = net
 
     def GetNumber(self) -> str:
         return self._numara
+
+    def GetNetname(self) -> str:
+        return self._net
 
     def GetPosition(self) -> SahteNokta:
         return self._konum
@@ -132,22 +162,58 @@ class SahtePad:
         return self._boy_y
 
     def GetAttribute(self) -> str:
-        return "NPTH" if self._npth else "SMD"
+        return self._attribute
 
     def GetSolderMaskExpansion(self, layer) -> int:
         return self._mask_exp
 
+    def IsOnLayer(self, layer) -> bool:
+        return self._katmanlar is None or layer in self._katmanlar
+
+    def GetEffectivePolygon(self, layer) -> SahtePolygonAlan:
+        return SahtePolygonAlan(self._konum, self._boy_x, self._boy_y)
+
+
+class SahteFPID:
+    """`footprint.GetFPID().GetLibItemName()` taklidi — `str()` ile
+    doğrudan paket adına (ör. 'SOT-23-6', 'C_0402_1005Metric') çevrilir,
+    gerçek pcbnew'in `UTF8` proxy nesnesiyle DAVRANIŞSAL olarak uyumlu."""
+
+    def __init__(self, lib_item_adi: str):
+        self._ad = lib_item_adi
+
+    def GetLibItemName(self) -> "SahteFPID":
+        return self
+
+    def __str__(self) -> str:
+        return self._ad
+
 
 class SahteFootprint:
-    def __init__(self, ref: str, padlar: List[SahtePad]):
+    def __init__(
+        self, ref: str, padlar: List[SahtePad],
+        fpid: str = "", deger: str = "", x_mm: float = 0.0, y_mm: float = 0.0,
+    ):
         self._ref = ref
         self._padlar = padlar
+        self._fpid = fpid
+        self._deger = deger
+        self._konum = SahteNokta(x_mm, y_mm)
 
     def GetReference(self) -> str:
         return self._ref
 
     def Pads(self) -> List[SahtePad]:
         return self._padlar
+
+    def GetFPID(self) -> SahteFPID:
+        return SahteFPID(self._fpid)
+
+    def GetValue(self) -> str:
+        return self._deger
+
+    def GetPosition(self) -> SahteNokta:
+        return self._konum
 
 
 class SahteIz:
@@ -160,6 +226,7 @@ class SahteIz:
         net: str = "",
         ust_katman: int = 0,
         alt_katman: int = 1,
+        katman: int = 0,
     ):
         self._tip = tip
         self._s = SahteNokta(*baslangic_mm)
@@ -168,6 +235,7 @@ class SahteIz:
         self._net = net
         self._ust = ust_katman
         self._alt = alt_katman
+        self._katman = katman
 
     def GetClass(self) -> str:
         return self._tip
@@ -178,7 +246,10 @@ class SahteIz:
     def GetEnd(self) -> SahteNokta:
         return self._e
 
-    def GetWidth(self) -> int:
+    def GetWidth(self, *_katman_argumani) -> int:
+        # gerçek pcbnew'de PCB_TRACK.GetWidth() argümansız, PCB_VIA.GetWidth(katman)
+        # BİR argüman ister (tuzak (d)/(e), bkz. dosya başlığı) — bu taklit
+        # HER İKİSİNİ de kabul eder, verilen argümanı yok sayar.
         return self._genislik
 
     def GetNetname(self) -> str:
@@ -192,6 +263,9 @@ class SahteIz:
 
     def BottomLayer(self) -> int:
         return self._alt
+
+    def GetLayer(self) -> int:
+        return self._katman
 
 
 class SahteBoard:
@@ -215,6 +289,8 @@ class TaklitPcbnew:
     `pcbnew_koprusu` fonksiyonlarının kullandığı sabitler/fabrika."""
 
     PAD_ATTRIB_NPTH = "NPTH"
+    PAD_ATTRIB_SMD = "SMD"
+    PAD_ATTRIB_CONN = "CONN"
     F_Cu = 0
     Edge_Cuts = "Edge.Cuts"
     UNDEFINED_LAYER = -999
@@ -261,6 +337,57 @@ def _iki_pedli_pasif(aralik_mm: float = 2.0, pad_boyu_mm: float = 1.0) -> SahteF
     p1 = SahtePad("1", -aralik_mm / 2.0, 0.0, pad_boyu_mm, pad_boyu_mm)
     p2 = SahtePad("2", aralik_mm / 2.0, 0.0, pad_boyu_mm, pad_boyu_mm)
     return SahteFootprint("C1", [p1, p2])
+
+
+# ------------------------------------------------------------------
+# 0b. net_iz_ve_via_listesi_topla — ortak yardımcı
+# ------------------------------------------------------------------
+
+class TestNetIzVeViaListesiTopla:
+    """`net_iz_ve_via_listesi_topla()` — `openems_koprusu.py::geometri_cikar()`
+    gibi başka köprülerin tekrar yazmak yerine ÇAĞIRACAĞI ortak yardımcı."""
+
+    def test_sadece_hedef_nete_ait_izler_toplanir(self):
+        hedef = SahteIz("PCB_TRACK", (0.0, 0.0), (1.0, 0.0), genislik_mm=0.2, net="MIPI_P", katman=0)
+        diger = SahteIz("PCB_TRACK", (0.0, 1.0), (1.0, 1.0), genislik_mm=0.2, net="MIPI_N", katman=0)
+        board = SahteBoard([], izler=[hedef, diger])
+
+        sonuc = net_iz_ve_via_listesi_topla(board, "MIPI_P")
+
+        assert len(sonuc["izler"]) == 1
+        assert sonuc["izler"][0]["baslangic_mm"] == (0.0, 0.0)
+        assert sonuc["izler"][0]["bitis_mm"] == (1.0, 0.0)
+        assert sonuc["izler"][0]["genislik_mm"] == pytest.approx(0.2)
+        assert sonuc["vialar"] == []
+
+    def test_pcb_arc_tuzagi_atlanmaz(self):
+        """TUZAK (a): PCB_ARC, PCB_TRACK'ten AYRI bir GetClass() döner —
+        her ikisi de 'izler' listesine dahil edilmeli."""
+        yay = SahteIz("PCB_ARC", (0.0, 0.0), (1.0, 1.0), net="MIPI_P")
+        board = SahteBoard([], izler=[yay])
+
+        sonuc = net_iz_ve_via_listesi_topla(board, "MIPI_P")
+
+        assert len(sonuc["izler"]) == 1
+
+    def test_via_ayri_listede_toplanir_ve_katman_argumanli_genislik_okunur(self):
+        via = SahteIz("PCB_VIA", (2.0, 2.0), (2.0, 2.0), genislik_mm=0.3, net="MIPI_P",
+                       ust_katman=0, alt_katman=2)
+        board = SahteBoard([], izler=[via])
+
+        sonuc = net_iz_ve_via_listesi_topla(board, "MIPI_P")
+
+        assert sonuc["izler"] == []
+        assert len(sonuc["vialar"]) == 1
+        assert sonuc["vialar"][0]["konum_mm"] == (2.0, 2.0)
+        assert sonuc["vialar"][0]["cap_mm"] == pytest.approx(0.3)
+        assert sonuc["vialar"][0]["ust_katman"] == 0
+        assert sonuc["vialar"][0]["alt_katman"] == 2
+
+    def test_baska_nete_ait_ogeler_disarida_birakilir(self):
+        board = SahteBoard([], izler=[SahteIz("PCB_TRACK", (0, 0), (1, 0), net="GND")])
+        sonuc = net_iz_ve_via_listesi_topla(board, "MIPI_P")
+        assert sonuc == {"izler": [], "vialar": []}
 
 
 # ------------------------------------------------------------------
@@ -515,3 +642,278 @@ class TestStitchYogunlugu:
 
         turler = [i["tur"] for i in bulgu.ihlaller]
         assert "via_donusu" in turler
+
+
+class TestPcbnewYokFallback:
+    """2026-08-03, Madde 5: `pcbnew` GERÇEKTEN kurulu değilken (autouse
+    taklidi bilerek KALDIRILIR — bu ortamda `pcbnew` zaten pip-kurulu
+    DEĞİL, `ModuleNotFoundError` gerçek/organik olarak oluşur) `board_path`
+    alan dört `*_kontrolu()` fonksiyonu exception FIRLATMAMALI, KAPSAM_YOK
+    `Bulgu` döndürmeli — sessiz crash yerine."""
+
+    @pytest.fixture(autouse=True)
+    def _pcbnew_yi_gercekten_kaldir(self, monkeypatch):
+        monkeypatch.delitem(sys.modules, "pcbnew", raising=False)
+        yield
+
+    def test_via_in_pad_pcbnew_yokken_kapsam_yok(self):
+        from pcbnew_koprusu import via_in_pad_kontrolu
+        bulgu = via_in_pad_kontrolu("board.kicad_pcb")
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+        assert "pcbnew modülü bulunamadı" in bulgu.detay
+
+    def test_annular_ring_pcbnew_yokken_kapsam_yok(self):
+        from pcbnew_koprusu import annular_ring_kontrolu
+        bulgu = annular_ring_kontrolu("board.kicad_pcb")
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+
+    def test_kenar_keepout_seramik_pcbnew_yokken_kapsam_yok(self):
+        from pcbnew_koprusu import kenar_keepout_seramik_kontrolu
+        bulgu = kenar_keepout_seramik_kontrolu("board.kicad_pcb")
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+
+    def test_stitch_yogunlugu_pcbnew_yokken_kapsam_yok(self):
+        bulgu = stitch_yogunlugu_kontrolu("board.kicad_pcb")
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+
+
+# ------------------------------------------------------------------
+# GÖREV (2026-08-04): via_in_pad_kontrolu GENİŞLETMESİ —
+# via_siniflandirma_haritasi ile dolgu_ve_kapak_var_mi filtrelemesi
+# ------------------------------------------------------------------
+
+def _via_ve_smd_pad_ayni_konumda(via_konum_mm=(0.0, 0.0)) -> SahteBoard:
+    """Tek bir SMD ped ve TAM ÜSTÜNDE (via-in-pad) bir via içeren board."""
+    from pcbnew_koprusu import via_in_pad_kontrolu  # noqa: F401 (import doğrulama)
+
+    pad = SahtePad("1", via_konum_mm[0], via_konum_mm[1], 0.6, 0.6, attribute="SMD")
+    fp = SahteFootprint("U1", [pad])
+    via = SahteIz(
+        "PCB_VIA", baslangic_mm=via_konum_mm, bitis_mm=via_konum_mm,
+        net="VDD_CORE", ust_katman=0, alt_katman=1,
+    )
+    return SahteBoard([fp], izler=[via])
+
+
+class TestViaInPadGenisletme:
+    def test_harita_yoksa_eski_davranis_ihlal_uretir(self):
+        """`via_siniflandirma_haritasi=None` (varsayılan) -> GERİYE DÖNÜK
+        UYUMLU: geometrik via-in-pad her zamanki gibi ihlal listesine girer."""
+        board = _via_ve_smd_pad_ayni_konumda()
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = via_in_pad_kontrolu("board.kicad_pcb")
+
+        assert bulgu.durum.value == "FAIL"
+        assert bulgu.taranan == 1
+        assert len(bulgu.ihlaller) == 1
+        assert bulgu.ihlaller[0]["pad"] == "U1.1"
+        assert bulgu.ihlaller[0]["dolgu_ve_kapak_biliniyor_mu"] is None
+
+    def test_harita_dolgu_kapak_true_ise_ihlal_degil(self):
+        """Via_siniflandirma.py::select_via_type_for_bga() ile bilinçli
+        IPC-4761 Type VII olarak tasarlanmış via-in-pad -> gerçek DRC
+        hatası SAYILMAZ (görev talimatı: 'zaten doğru tasarlanmış')."""
+        board = _via_ve_smd_pad_ayni_konumda(via_konum_mm=(1.5, 2.5))
+        _taklit_pcbnew_yukle(board)
+
+        harita = {(1.5, 2.5): True}
+        bulgu = via_in_pad_kontrolu("board.kicad_pcb", via_siniflandirma_haritasi=harita)
+
+        assert bulgu.durum.value == "PASS"
+        assert bulgu.taranan == 1
+        assert bulgu.ihlaller == []
+
+    def test_harita_dolgu_kapak_false_ise_gercek_drc_hatasi(self):
+        """`dolgu_ve_kapak_var_mi=False` (sınıflandırma bilinçli olarak
+        'yok' diyor) -> ESKİ 'fab notunda belirtilmeli' tavsiyesi değil,
+        GERÇEK bir DRC hatası (FAIL) — görev talimatı madde 3."""
+        board = _via_ve_smd_pad_ayni_konumda(via_konum_mm=(3.0, 3.0))
+        _taklit_pcbnew_yukle(board)
+
+        harita = {(3.0, 3.0): False}
+        bulgu = via_in_pad_kontrolu("board.kicad_pcb", via_siniflandirma_haritasi=harita)
+
+        assert bulgu.durum.value == "FAIL"
+        assert bulgu.ihlaller[0]["dolgu_ve_kapak_biliniyor_mu"] is False
+
+    def test_harita_verilmis_ama_konum_eslesmiyorsa_bilinmiyor_sayilir(self):
+        """Harita verildi ama BU via'nın konumu haritada yoksa -> `None`
+        (bilinmiyor) — sessizce 'temiz' SAYILMAZ, eski/güvenli davranışa
+        (ihlal) düşer."""
+        board = _via_ve_smd_pad_ayni_konumda(via_konum_mm=(5.0, 5.0))
+        _taklit_pcbnew_yukle(board)
+
+        harita = {(9.0, 9.0): True}  # başka bir via'ya ait, bu konumla eşleşmiyor
+        bulgu = via_in_pad_kontrolu("board.kicad_pcb", via_siniflandirma_haritasi=harita)
+
+        assert bulgu.durum.value == "FAIL"
+        assert bulgu.ihlaller[0]["dolgu_ve_kapak_biliniyor_mu"] is None
+
+    def test_via_pad_disindaysa_hala_ihlal_uretmez(self):
+        """Regresyon: via pad'in İÇİNDE değilse (normal, ayrı bir via)
+        harita hiç devreye girmeden zaten ihlal üretilmemeli."""
+        pad = SahtePad("1", 0.0, 0.0, 0.6, 0.6, attribute="SMD")
+        fp = SahteFootprint("U1", [pad])
+        via = SahteIz("PCB_VIA", baslangic_mm=(5.0, 5.0), bitis_mm=(5.0, 5.0), net="VDD_CORE")
+        board = SahteBoard([fp], izler=[via])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = via_in_pad_kontrolu("board.kicad_pcb")
+
+        assert bulgu.durum.value == "PASS"
+        assert bulgu.ihlaller == []
+
+
+# ------------------------------------------------------------------
+# GÖREV (2026-08-04): dekuplaj_mesafe_kontrolu — fiziksel mesafe kontrolü
+# ------------------------------------------------------------------
+
+from pcbnew_koprusu import dekuplaj_mesafe_kontrolu  # noqa: E402
+
+
+def _ic_footprint(ref: str, fpid: str, pad_net_x_y) -> SahteFootprint:
+    """`pad_net_x_y`: [(pad_no, net, x_mm, y_mm), ...]"""
+    padlar = [SahtePad(no, x, y, 0.5, 0.5, net=net) for no, net, x, y in pad_net_x_y]
+    # SahtePad'in son parametresi net değil attribute — burada özel kurucu
+    # kullanmak yerine doğrudan _net'i set ediyoruz (aşağıdaki yardımcı).
+    return SahteFootprint(ref, padlar, fpid=fpid)
+
+
+def _pad_net_ata(pad: SahtePad, net: str) -> SahtePad:
+    pad._net = net  # test-only erişim, üretim kodu bu alana erişmez
+    return pad
+
+
+def _qfn_ic(ref: str, vdd_konum_mm, fpid: str = "QFN-36-1EP_5x6mm") -> SahteFootprint:
+    vdd_pad = _pad_net_ata(SahtePad("1", vdd_konum_mm[0], vdd_konum_mm[1], 0.3, 0.3), "VDD")
+    gnd_pad = _pad_net_ata(SahtePad("2", vdd_konum_mm[0] + 1, vdd_konum_mm[1], 0.3, 0.3), "GND")
+    return SahteFootprint(ref, [vdd_pad, gnd_pad], fpid=fpid)
+
+
+def _dekuplaj_kapasitoru(ref: str, x_mm: float, y_mm: float, deger: str = "100nF") -> SahteFootprint:
+    pad1 = SahtePad("1", x_mm - 0.5, y_mm, 0.3, 0.3)
+    pad2 = SahtePad("2", x_mm + 0.5, y_mm, 0.3, 0.3)
+    return SahteFootprint(ref, [pad1, pad2], fpid="C_0402_1005Metric", deger=deger, x_mm=x_mm, y_mm=y_mm)
+
+
+class TestDekuplajMesafeKontrolu:
+    def test_pcbnew_yokken_kapsam_yok(self, monkeypatch):
+        monkeypatch.delitem(sys.modules, "pcbnew", raising=False)
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb")
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+
+    def test_yakin_kapasitor_pass(self):
+        """Kasıtlı YAKIN yerleştirilmiş kapasitör -> PASS."""
+        ic = _qfn_ic("U1", (10.0, 10.0))
+        cap = _dekuplaj_kapasitoru("C1", 10.5, 10.0)  # IC'nin VDD pininden 0.5mm
+        board = SahteBoard([ic, cap])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb", maks_mesafe_mm=3.0)
+
+        assert bulgu.durum.value == "PASS"
+        assert bulgu.taranan == 1  # sadece VDD pini taranır (GND pini değil)
+        assert bulgu.ihlaller == []
+
+    def test_uzak_kapasitor_kasitli_fail(self):
+        """KASITLI olarak uzak (20mm) yerleştirilmiş kapasitör -> FAIL,
+        ihlal 'kapasitor_uzak' türünde ve doğru mesafeyi rapor eder."""
+        ic = _qfn_ic("U1", (10.0, 10.0))
+        cap = _dekuplaj_kapasitoru("C1", 30.0, 10.0, "100nF")  # 20mm uzak
+        board = SahteBoard([ic, cap])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb", maks_mesafe_mm=3.0)
+
+        assert bulgu.durum.value == "FAIL"
+        assert len(bulgu.ihlaller) == 1
+        ihlal = bulgu.ihlaller[0]
+        assert ihlal["tur"] == "kapasitor_uzak"
+        assert ihlal["pin"] == "U1.1"
+        assert ihlal["mesafe_mm"] == pytest.approx(20.0)
+        assert ihlal["en_yakin_kapasitor"] == "C1"
+
+    def test_kapasitor_hic_yoksa_ayri_ihlal_turu(self):
+        """Uygun kapasitör HİÇ yoksa 'kapasitor_yok' türü — 'kapasitor_uzak'
+        ile KARIŞTIRILMAZ (görev talimatı madde 6)."""
+        ic = _qfn_ic("U1", (10.0, 10.0))
+        board = SahteBoard([ic])  # hiç kapasitör yok
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb")
+
+        assert bulgu.durum.value == "FAIL"
+        assert bulgu.ihlaller[0]["tur"] == "kapasitor_yok"
+
+    def test_deger_araligi_disindaki_kapasitor_aday_sayilmaz(self):
+        """10uF bulk kapasitör 47-220nF aralığı DIŞINDA -> aday sayılmaz,
+        IC'nin yanında olsa bile 'kapasitor_yok' üretir."""
+        ic = _qfn_ic("U1", (10.0, 10.0))
+        bulk_cap = _dekuplaj_kapasitoru("C1", 10.2, 10.0, "10uF")
+        board = SahteBoard([ic, bulk_cap])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb")
+
+        assert bulgu.durum.value == "FAIL"
+        assert bulgu.ihlaller[0]["tur"] == "kapasitor_yok"
+
+    def test_ic_olmayan_footprint_taranmaz(self):
+        """Basit bir direnç (SMD ama IC DEĞİL) taramaya dahil edilmemeli."""
+        direnc_pad = _pad_net_ata(SahtePad("1", 0.0, 0.0, 0.3, 0.3), "VDD")
+        direnc = SahteFootprint("R1", [direnc_pad], fpid="R_0402_1005Metric")
+        board = SahteBoard([direnc])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb")
+
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+
+    def test_sot_3_pinli_transistor_ic_sayilmaz(self):
+        """3 pinli SOT-23 (basit transistör) IC SAYILMAMALI — sadece
+        >=5 pinli SOT (LDO/ESD gibi) IC sayılır."""
+        pad1 = _pad_net_ata(SahtePad("1", 0.0, 0.0, 0.3, 0.3), "VDD")
+        pad2 = _pad_net_ata(SahtePad("2", 0.5, 0.0, 0.3, 0.3), "GND")
+        pad3 = _pad_net_ata(SahtePad("3", 1.0, 0.0, 0.3, 0.3), "OUT")
+        transistor = SahteFootprint("Q1", [pad1, pad2, pad3], fpid="SOT-23")
+        board = SahteBoard([transistor])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb")
+
+        assert bulgu.durum.value == "KAPSAM_YOK"
+        assert bulgu.taranan == 0
+
+    def test_sot_6_pinli_ldo_ic_sayilir(self):
+        """6 pinli SOT-23-6 (ör. LDO/ESD dizisi) IC SAYILMALI."""
+        padlar = [_pad_net_ata(SahtePad(str(i), float(i), 0.0, 0.3, 0.3),
+                                "VDD" if i == 1 else "GND") for i in range(1, 7)]
+        ldo = SahteFootprint("U1", padlar, fpid="SOT-23-6")
+        board = SahteBoard([ldo])
+        _taklit_pcbnew_yukle(board)
+
+        bulgu = dekuplaj_mesafe_kontrolu("board.kicad_pcb")
+
+        assert bulgu.taranan == 1  # sadece VDD pini (pad 1)
+        assert bulgu.ihlaller[0]["tur"] == "kapasitor_yok"
+
+    def test_maks_mesafe_parametresi_uygulanir(self):
+        """`maks_mesafe_mm` özelleştirilebilir — daha gevşek bir sınırla
+        aynı mesafe artık PASS olmalı."""
+        ic = _qfn_ic("U1", (10.0, 10.0))
+        cap = _dekuplaj_kapasitoru("C1", 15.0, 10.0)  # 5mm uzak
+        board = SahteBoard([ic, cap])
+        _taklit_pcbnew_yukle(board)
+
+        siki = dekuplaj_mesafe_kontrolu("board.kicad_pcb", maks_mesafe_mm=3.0)
+        gevsek = dekuplaj_mesafe_kontrolu("board.kicad_pcb", maks_mesafe_mm=10.0)
+
+        assert siki.durum.value == "FAIL"
+        assert gevsek.durum.value == "PASS"
