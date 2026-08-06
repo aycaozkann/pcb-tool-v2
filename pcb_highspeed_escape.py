@@ -256,6 +256,149 @@ class EscapeDegerlendirmesi:
     butce_ps: Optional[float] = None
 
 
+# ------------------------------------------------------------------
+# 7. 0.4mm-PITCH GND-AYRILMIŞ KONNEKTÖR ESCAPE (referans board türevi)
+# ------------------------------------------------------------------
+#
+# KAYNAK: Resmi Raspberry Pi Foundation CM4 IO Board tasarım dosyaları
+# (v3l0c1r4pt0r/CM4IO-KiCAD, CC BY 4.0 — https://github.com/v3l0c1r4pt0r/CM4IO-KiCAD).
+# `CM4IOv5.kicad_pcb` içindeki TRD0-3_P/N (Gigabit Ethernet, CM4 B2B
+# konnektörü/"Module1"→ common-mode choke U1/U2 arası) segment zinciri
+# s-expression seviyesinde chain-walk edilerek çıkarıldı (2026-08-04,
+# cm4-io-test/REFERANS/CM4IOv5_orijinal/ altında saklı ham veri).
+#
+# BULGULAR (8 net, 12 segmentlik zincirlerin TAMAMI incelendi):
+#   1. Pad'den ilk segment: pad'in KENDİ çıkış yönünde düz, 0.44-0.63mm
+#      (native pad tail uzunluğu ile aynı mertebede).
+#   2. Bunu TAKİBEN (toplam 0.5-2.1mm içinde) TEK bir 45° dönüş ile uzun
+#      diyagonale (135°/45°) commit edilir — J1/J2 gibi 0.4mm'lik yoğun
+#      pad satırından "önce tam kaçış SONRA köşegen" değil, neredeyse
+#      ANINDA köşegene geçiliyor.
+#   3. P/N ÇİFTİ, committed diyagonalin TAMAMI boyunca (referans board'da
+#      ölçülen örnekte ~42mm) SEGMENT UZUNLUKLARI BİREBİR EŞİT tutularak
+#      rijit paralel-ofset olarak taşınıyor — "coupling" tek bir yakınsama
+#      noktası değil, sürdürülen bir DİSİPLİN.
+#   4. Her ucun YAKININDA (pad tarafında VE hedef tarafında), P/N pad
+#      pozisyonlarındaki eksen uyuşmazlığını gidermek için ≤~1.6mm'lik
+#      BAĞIMSIZ (kuplajsız) "trim" segmentlerine izin veriliyor — bu
+#      trim'ler kuralın İSTİSNASI değil, kuralın kendisinin bir parçası.
+#   5. HİÇBİR köşe ham 90° değil — sadece 45°/90°/135°/180° kombinasyonu;
+#      gerçek bir 90° gerektiğinde iki 45° + aralarında <0.1mm'lik mikro
+#      segmentle "chamfer" ediliyor (bkz. `dik_acili_koseleri_bul` — bu
+#      disiplin zaten o fonksiyonun varsayımıyla birebir örtüşüyor).
+#   6. SIFIR via — ama bunun nedeni yönlendirme değil YERLEŞİM: ilk pasif
+#      bileşen (choke), konnektörden çıkan 45° çizginin önünde başka hiçbir
+#      footprint'in olmayacağı kadar yakın/hizalı konumlandırılmış
+#      ([[feedback_placement_trumps_routing]] ile birebir örtüşüyor).
+#      Bizim board'umuzda hedef IC (ör. D4-D7) o hizada DEĞİLSE (araya
+#      başka bileşen giriyorsa), kural (6) ihlal edilir ve via-pair hop'u
+#      gerekli hale gelir — bkz. `via_pair_gerekli_mi` altta.
+#   7. Aynı koridoru paylaşan KOMŞU çiftler (ör. TRD0 ile TRD1) arasında
+#      ölçülen pair-to-pair mesafe ~0.45-0.47mm (0.127mm iz genişliğinde)
+#      — J1/J2 gibi board'larda kullanılan daha kalın izlerde (0.15-0.2mm)
+#      orantılı olarak büyütülmeli (bkz. `pair_to_pair_min_mesafe_mm`).
+
+@dataclass
+class YuksekYogunlukKonnektorEscape:
+    """0.4mm (veya benzeri ince) pitch'li, GND ile ayrılmış diferansiyel
+    çift satırından çıkış parametreleri (J1/J2 DF40 tipi B2B konnektör,
+    referans: CM4 IO Board TRD escape'i)."""
+
+    pad_pitch_mm: float
+    """Konnektörün native pin pitch'i (ör. 0.4mm)."""
+    iz_genisligi_mm: float
+    """Kullanılacak diferansiyel iz genişliği (proje genelinde tutarlı
+    olmalı — cm4-io-test'te HDMI için 0.2mm kullanıldı, referans board
+    0.127mm kullanmış; MUTLAK değer değil, ORAN önemli)."""
+    ilk_duz_segment_mm: float = 0.55
+    """Pad'den, pad'in kendi çıkış yönünde düz segment (referans: 0.44-0.63mm)."""
+    commit_mesafesi_mm: float = 2.1
+    """Bu mesafeye kadar TEK bir 45° dönüşle uzun diyagonale commit
+    edilmiş olmalı (referans: 0.5-2.1mm aralığı, üst sınır alındı)."""
+    max_trim_segment_mm: float = 1.6
+    """Her ucun yakınında P/N pad pozisyon farkını gidermek için izin
+    verilen MAKSİMUM bağımsız (kuplajsız) segment uzunluğu."""
+
+
+def pair_to_pair_min_mesafe_mm(esc: YuksekYogunlukKonnektorEscape) -> float:
+    """Aynı koridoru paylaşan komşu çiftler arası minimum merkez-merkez
+    mesafe. Referans oranı (~0.47mm / 0.127mm iz ≈ 3.7x) bu projenin iz
+    genişliğine ölçeklenir."""
+    referans_oran = 0.47 / 0.127
+    return round(esc.iz_genisligi_mm * referans_oran, 4)
+
+
+def via_pair_gerekli_mi(
+    pad_konumu: Tuple[float, float],
+    hedef_konumu: Tuple[float, float],
+    engel_bbox_listesi: List[Tuple[float, float, float, float]],
+) -> bool:
+    """
+    Pad'den hedefe TEK bir 45°/135° diyagonal çizgi (referans board'daki
+    gibi) çekildiğinde, bu çizgi verilen engel bbox'larından (x1,y1,x2,y2)
+    HERHANGİ biriyle kesişiyor mu kontrol eder. Kesişiyorsa kural (6)
+    ihlal edilmiş demektir — via-pair (İn2.Cu tünel) hop'u gerekli.
+
+    NOT: Bu, YERLEŞİMİN routing'den önce doğrulanması gerektiği kuralının
+    ([[feedback_placement_trumps_routing]]) otomatik kontrolüdür — sonuç
+    True ise, önce hedef bileşenin/ara pasifin taşınıp taşınamayacağı
+    değerlendirilmeli; taşınamıyorsa via-pair kullanılır (Faz 4 istisnası).
+    """
+    x1p, y1p = pad_konumu
+    x2p, y2p = hedef_konumu
+
+    def _segment_intersects_bbox(bbox: Tuple[float, float, float, float]) -> bool:
+        bx1, by1, bx2, by2 = bbox
+        # Liang-Barsky segment/aabb kesişim testi
+        dx, dy = x2p - x1p, y2p - y1p
+        t0, t1 = 0.0, 1.0
+        for p, q in (
+            (-dx, (x1p - bx1)),
+            (dx, (bx2 - x1p)),
+            (-dy, (y1p - by1)),
+            (dy, (by2 - y1p)),
+        ):
+            if p == 0:
+                if q < 0:
+                    return False
+                continue
+            r = q / p
+            if p < 0:
+                if r > t1:
+                    return False
+                if r > t0:
+                    t0 = r
+            else:
+                if r < t0:
+                    return False
+                if r < t1:
+                    t1 = r
+        return t0 <= t1
+
+    return any(_segment_intersects_bbox(b) for b in engel_bbox_listesi)
+
+
+def escape_planı_olustur(
+    esc: YuksekYogunlukKonnektorEscape,
+    pad_konumu: Tuple[float, float],
+    kacis_yonu: Tuple[float, float],
+) -> List[Tuple[float, float]]:
+    """
+    Referans board disiplinine göre pad'den itibaren ilk ~commit_mesafesi
+    kadar olan waypoint dizisini üretir: pad -> düz kaçış -> 45° ile
+    diyagonale commit. `kacis_yonu` birim vektör olmalı (ör. (0,1) =
+    konnektör satırından +Y'ye kaçış, (0,-1) = -Y'ye).
+
+    Dönen liste, çağıranın uzun diyagonali bu son noktadan hedefe doğru
+    (via_pair_gerekli_mi=False ise doğrudan, True ise via-pair üzerinden)
+    devam ettirmesi için başlangıç noktalarını verir.
+    """
+    px, py = pad_konumu
+    kx, ky = kacis_yonu
+    duz_uc = (px + kx * esc.ilk_duz_segment_mm, py + ky * esc.ilk_duz_segment_mm)
+    return [pad_konumu, duz_uc]
+
+
 def escape_raporu_olustur(deger: EscapeDegerlendirmesi) -> List[str]:
     """Bir net için tüm escape kabul kriterlerini tek seferde değerlendirir."""
     bulgular: List[str] = []
