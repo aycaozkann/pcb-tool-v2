@@ -27,7 +27,10 @@ import math
 import re
 import sys
 
-import pcbnew
+try:
+    import pcbnew  # type: ignore
+except ImportError:  # projenin kendi kuralı: pcbnew bağımlılığı HER ZAMAN lazy
+    pcbnew = None  # noqa: N816
 
 MM = 1e6
 
@@ -315,6 +318,19 @@ def main(argv=None):
     ap.add_argument("--epad-area-mm2", type=float, default=4.0)
     ap.add_argument("--annular-min-mm", type=float, default=0.15)
     a = ap.parse_args(argv)
+
+    if pcbnew is None:
+        findings = [
+            result(c, 0, [], "pcbnew import edilemedi — kontrol KOŞULMADI")
+            for c in CHECKS
+        ]
+        out = {"board": a.board, "checks": findings,
+               "summary": {"NO_COVERAGE": len(findings), "PASS": 0, "FAIL": 0}}
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        if a.json:
+            with open(a.json, "w") as f:
+                json.dump(out, f, indent=2, ensure_ascii=False)
+        return 2  # "2 = çalıştırma hatası" (docstring) — pcbnew yoksa gerçek bir hata
 
     board = pcbnew.LoadBoard(a.board)
     findings = [
