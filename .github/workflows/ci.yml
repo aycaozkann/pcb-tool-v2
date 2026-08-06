@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv kur
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.14"
+
+      - name: Bağımlılıkları senkronla (uv.lock)
+        run: uv sync --dev
+
+      - name: Statik kontrol (proje çapında syntax/compile taraması)
+        run: |
+          # Bu projede henüz bir linter (ruff/flake8/mypy) benimsenmedi —
+          # sahte bir konfigürasyon UYDURMAK yerine, GERÇEKTEN var olan tek
+          # "static check" seviyesi kullanıldı: her .py dosyasının derlenip
+          # derlenmediği (syntax hatası, kırık import zinciri değil, saf
+          # sözdizimi). .venv/.scratch hariç tutulur.
+          git ls-files '*.py' | grep -v '^\.venv/' | grep -v '^\.scratch/' \
+            | xargs uv run python -m py_compile
+
+      - name: Test suite (pytest -q)
+        run: uv run python -m pytest -q
+
+      - name: Orkestrasyon zinciri duman testi (main.py run)
+        run: |
+          # CI ortamında gerçek KiCad kurulu DEĞİL (bilerek) — bu adımın
+          # amacı main.py'nin KiCad CLI'siz/proje'siz bir ortamda SESSİZCE
+          # ya da ham bir Python traceback'iyle çökmediğini, kontrollü/
+          # fail-closed bir çıkış koduyla durduğunu kanıtlamaktır (gerçek
+          # DRC/ERC/routing testleri zaten yukarıdaki pytest adımında,
+          # `test_gercek_board_dogrulama.py` gibi dosyalarda KiCad varsa
+          # koşuyor, yoksa skipif ile atlanıyor).
+          mkdir -p /tmp/pcb-tool-v2-bos-proje
+          set +e
+          CIKTI=$(uv run python main.py run --project-dir /tmp/pcb-tool-v2-bos-proje 2>&1)
+          KOD=$?
+          set -e
+          echo "$CIKTI"
+          if [ "$KOD" -eq 0 ]; then
+            echo "HATA: main.py run, KiCad CLI/proje dosyası olmadan PASS(0) döndü — bu OLMAMALI."
+            exit 1
+          fi
+          if echo "$CIKTI" | grep -q "Traceback (most recent call last)"; then
+            echo "HATA: main.py run ham bir Python traceback ile çöktü — fail-closed/kontrollü çıkış BEKLENİYORDU."
+            exit 1
+          fi
+          echo "main.py run kontrollü şekilde çıkış kodu $KOD ile durdu (KiCad CLI/proje eksikliği doğru raporlandı)."
