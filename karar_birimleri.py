@@ -228,3 +228,86 @@ def kabul_edilmemis_kararlari_bul(kararlar: List[KararBirimi]) -> List[KararBiri
     ulaşabiliyorsa) promotion bu kapıdan geçebilir — bkz.
     `main.py::cmd_promote`."""
     return [k for k in kararlar if k.durum != KararDurumu.KABUL_EDILDI]
+
+
+# ---------------------------------------------------------------------
+# KRİTİK PİN DATASHEET-TEYİT KAPISI (2026-08-04) — Madde 1'in entegre
+# edilebilir kısmı: datasheet'i OKUMAZ, teyit EDİLMEDEN promotion'ın
+# GEÇMESİNİ engeller (mevcut DAG/geçersizleme mantığı DEĞİŞTİRİLMEDİ —
+# sadece bu şemayı KULLANAN yeni bir üretici fonksiyon eklendi).
+# ---------------------------------------------------------------------
+
+# İsim deseni ile tespit edilen kritik pin kategorileri — "boot-strap",
+# "mode-select", "reserved/NDA" ailesi. Basit substring eşleşmesi
+# (regex DEĞİL) BİLİNÇLİ: sürpriz eşleşmeyi (ör. "SUBOOTH" gibi rastgele
+# bir net adı) azaltmak için kelime sınırına yakın kısa/spesifik desenler
+# seçildi. SIRA ÖNEMLİ: "SYSBOOT" gibi daha UZUN/spesifik desenler, "BOOT"
+# gibi daha KISA/genel bir alt-dizeyi de İÇERDİĞİ için ÖNCE denenir —
+# aksi halde "SYSBOOT0" gibi bir net her zaman genel "BOOT" kategorisine
+# düşer, daha spesifik "SYSBOOT" kategorisi hiç yakalanmaz.
+KRITIK_PIN_DESENLERI: tuple = ("SYSBOOT", "BOOT", "MODE_SEL", "NC_RESERVED", "NDA")
+
+
+def kritik_pin_kategorisi_tespit_et(net_isim: str, desenler: tuple = KRITIK_PIN_DESENLERI) -> Optional[str]:
+    """Net adında bilinen bir kritik-pin deseni varsa o deseni (kategori
+    adı olarak) döner, yoksa `None`."""
+    ad = net_isim.strip().upper()
+    for desen in desenler:
+        if desen in ad:
+            return desen
+    return None
+
+
+def kritik_pin_teyit_karari_olustur(pin_kategorisi: str, komponent: str, gerekce: str) -> KararBirimi:
+    """Bir komponentin kritik pin kategorisi için `durum=ACIK` bir
+    `KararBirimi` İNŞA EDER (henüz DİSKE YAZMAZ — bkz.
+    `kritik_pin_karalarini_tespit_ve_kaydet` diske yazan üst-seviye
+    fonksiyon için). `gereken_kanit` alanı BİLEREK sabit ve net: bu karar
+    KABUL_EDILDI olmadan `main.py promote` zaten mevcut
+    `kabul_edilmemis_kararlari_bul()` kapısından GEÇEMEZ — ek kod
+    GEREKMEZ, bu fonksiyon sadece doğru ŞEMADA bir kayıt üretir."""
+    karar_id = f"kritik-pin-teyit-{komponent}-{pin_kategorisi}".lower().replace("_", "-")
+    return KararBirimi(
+        karar_id=karar_id,
+        soru=(
+            f"{komponent} üzerindeki '{pin_kategorisi}' kategorisi kritik pin(ler) "
+            "üreticinin GÜNCEL datasheet/errata belgesinden teyit edildi mi?"
+        ),
+        sahip_skill=".claude/skills/schematic-design",
+        kisitlar=[gerekce],
+        gereken_kanit=(
+            "Üreticinin GÜNCEL datasheet/errata belgesinden pin seviyesi/direnç "
+            "değeri teyit edilmeli (ör. pull-up/pull-down zorunluluğu, strap "
+            "seviyesi, NC pininin GERÇEKTEN bağlantısız mı yoksa NDA-altı bir "
+            "fonksiyonu mu olduğu)."
+        ),
+        durum=KararDurumu.ACIK,
+        gecersizlik_tetikleyicileri=[f"{komponent} parça numarası/revizyonu değişirse"],
+    )
+
+
+def kritik_pin_karalarini_tespit_ve_kaydet(
+    project_dir: str, komponent: str, net_isimleri: List[str],
+) -> List[KararBirimi]:
+    """`net_isimleri`'ni tarar, HER benzersiz kritik-pin kategorisi için
+    (board'da o kategori için ZATEN bir kayıt yoksa) bir karar birimi
+    oluşturup diske kaydeder. Mevcut bir `karar_id`'yi EZMEZ — daha önce
+    `KABUL_EDILDI`'ye çekilmiş bir karar tekrar `ACIK`'a DÜŞÜRÜLMEZ (bu,
+    mevcut geçersizleme mantığının işi, `karar_gecersiz_kil()` ile
+    yapılır — bu fonksiyon ona DOKUNMAZ)."""
+    mevcut_id_seti = {k.karar_id for k in kararlari_yukle(project_dir)}
+    goruleen_kategoriler: List[str] = []
+    for net in net_isimleri:
+        kategori = kritik_pin_kategorisi_tespit_et(net)
+        if kategori is None or kategori in goruleen_kategoriler:
+            continue
+        goruleen_kategoriler.append(kategori)
+        karar = kritik_pin_teyit_karari_olustur(
+            kategori, komponent, f"Net '{net}' kritik pin deseniyle eşleşti.",
+        )
+        if karar.karar_id in mevcut_id_seti:
+            continue
+        karar_ekle_veya_guncelle(project_dir, karar)
+
+    guncel = kararlari_yukle(project_dir)
+    return [k for k in guncel if k.karar_id.startswith(f"kritik-pin-teyit-{komponent.lower()}-")]

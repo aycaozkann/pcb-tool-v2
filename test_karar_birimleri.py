@@ -177,3 +177,95 @@ def test_kabul_edilmemis_kararlari_bul_acik_olani_yakalar():
 def test_kabul_edilmemis_kararlari_bul_kanit_bekliyor_da_yakalanir():
     kararlar = [_karar("A", durum=KararDurumu.KANIT_BEKLIYOR)]
     assert len(kabul_edilmemis_kararlari_bul(kararlar)) == 1
+
+
+# ------------------------------------------------------------------
+# GÖREV (2026-08-04): Kritik Pin Datasheet-Teyit Kapısı
+# ------------------------------------------------------------------
+
+from karar_birimleri import (  # noqa: E402
+    kritik_pin_kategorisi_tespit_et,
+    kritik_pin_teyit_karari_olustur,
+    kritik_pin_karalarini_tespit_ve_kaydet,
+)
+
+
+class TestKritikPinKategorisiTespitEt:
+    def test_boot_deseni_yakalanir(self):
+        assert kritik_pin_kategorisi_tespit_et("SYSBOOT0") == "SYSBOOT"
+
+    def test_mode_sel_deseni_yakalanir(self):
+        assert kritik_pin_kategorisi_tespit_et("MODE_SEL1") == "MODE_SEL"
+
+    def test_normal_net_eslesmez(self):
+        assert kritik_pin_kategorisi_tespit_et("GPIO17") is None
+
+    def test_nc_reserved_deseni_yakalanir(self):
+        assert kritik_pin_kategorisi_tespit_et("PIN23_NC_RESERVED") == "NC_RESERVED"
+
+
+class TestKritikPinTeyitKararaOlustur:
+    def test_durum_acik_ve_gereken_kanit_datasheet_vurgulu(self):
+        karar = kritik_pin_teyit_karari_olustur("BOOT", "STM32F4", "Net 'BOOT0' eşleşti.")
+        assert karar.durum == KararDurumu.ACIK
+        assert "datasheet" in karar.gereken_kanit.lower()
+        assert karar.karar_id == "kritik-pin-teyit-stm32f4-boot"
+
+
+class TestKritikPinTeyitKapisi:
+    """UÇTAN UCA: kritik pin deseni içeren bir komponent -> karar otomatik
+    ACIK olarak DİSKE yazılır -> promotion (kabul_edilmemis_kararlari_bul)
+    bu yüzden RED verir."""
+
+    def test_kritik_pin_iceren_komponent_karar_acik_olusturur(self, tmp_path):
+        net_isimleri = ["VCC", "GND", "BOOT0", "GPIO2"]
+        olusturulanlar = kritik_pin_karalarini_tespit_ve_kaydet(
+            str(tmp_path), "STM32F407", net_isimleri,
+        )
+        assert len(olusturulanlar) == 1
+        assert olusturulanlar[0].durum == KararDurumu.ACIK
+        assert olusturulanlar[0].karar_id == "kritik-pin-teyit-stm32f407-boot"
+
+        # DİSKE gerçekten yazıldığını doğrula (yeni bir yükleme ile)
+        diskten = kararlari_yukle(str(tmp_path))
+        assert any(k.karar_id == "kritik-pin-teyit-stm32f407-boot" for k in diskten)
+
+    def test_promotion_bu_karar_yuzunden_red_verir(self, tmp_path):
+        kritik_pin_karalarini_tespit_ve_kaydet(str(tmp_path), "STM32F407", ["BOOT0", "VCC"])
+
+        kararlar = kararlari_yukle(str(tmp_path))
+        kabul_edilmemisler = kabul_edilmemis_kararlari_bul(kararlar)
+
+        assert len(kabul_edilmemisler) == 1  # promotion RED (bu karar KABUL_EDILDI değil)
+        assert kabul_edilmemisler[0].karar_id == "kritik-pin-teyit-stm32f407-boot"
+
+    def test_kabul_edildikten_sonra_promotion_gecer(self, tmp_path):
+        kritik_pin_karalarini_tespit_ve_kaydet(str(tmp_path), "STM32F407", ["BOOT0"])
+        kararlar = kararlari_yukle(str(tmp_path))
+        kararlar[0].durum = KararDurumu.KABUL_EDILDI
+        kararlari_kaydet(str(tmp_path), kararlar)
+
+        assert kabul_edilmemis_kararlari_bul(kararlari_yukle(str(tmp_path))) == []
+
+    def test_zaten_kabul_edilmis_karar_tekrar_acik_yapilmaz(self, tmp_path):
+        """Aynı kritik pin deseni İKİNCİ kez tespit edilse bile (ör. bir
+        sonraki oturumda tekrar taranırsa), daha önce KABUL_EDILDI'ye
+        çekilmiş bir karar sessizce EZİLİP tekrar ACIK yapılmamalı."""
+        kritik_pin_karalarini_tespit_ve_kaydet(str(tmp_path), "STM32F407", ["BOOT0"])
+        kararlar = kararlari_yukle(str(tmp_path))
+        kararlar[0].durum = KararDurumu.KABUL_EDILDI
+        kararlari_kaydet(str(tmp_path), kararlar)
+
+        # AYNI komponent/net tekrar taransın
+        kritik_pin_karalarini_tespit_ve_kaydet(str(tmp_path), "STM32F407", ["BOOT0", "VCC"])
+
+        guncel = kararlari_yukle(str(tmp_path))
+        boot_karari = next(k for k in guncel if k.karar_id == "kritik-pin-teyit-stm32f407-boot")
+        assert boot_karari.durum == KararDurumu.KABUL_EDILDI  # EZİLMEDİ
+
+    def test_normal_komponent_hic_karar_uretmez(self, tmp_path):
+        olusturulanlar = kritik_pin_karalarini_tespit_ve_kaydet(
+            str(tmp_path), "R1", ["VCC", "GND", "GPIO5"],
+        )
+        assert olusturulanlar == []
+        assert kararlari_yukle(str(tmp_path)) == []
