@@ -408,3 +408,52 @@ eşik: "bu dersi bilmeseydim aynı hatayı BAŞKA bir projede de yapardım mı?"
 - **Kaynak:** commit `8763fb0`, `TEST/KALDIGIMIZ_YER.md` (2026-07-31
   bölümü), `TEST/drc_u2_pins_clearance_fixed.json`,
   `TEST/pin5_after.png`/`pin12_after.png`.
+
+### 2026-08-03 — cm4-io-test — KiCad DSN export diferansiyel çift bilgisini TAŞIMIYOR; FreeRouting J1 için hiç uygun değil
+- **Bağlam:** J1'in 8 net'lik Gigabit Ethernet diferansiyel çifti (ETH_TRD0-3)
+  kendi yazılan A* mimarisiyle 3 denemede de "pair twist" problemine takılınca,
+  pcb-tool-v2'nin zaten doğrulanmış (GÖREV 10) gerçek FreeRouting zinciri
+  (`dsn_disa_aktar`/`freerouting_calistir`/`ses_iceri_aktar`) alternatif olarak
+  denendi.
+- **Ne oldu:** `pcbnew.ExportSpecctraDSN()` ile üretilen gerçek `.dsn` dosyası
+  incelenince, board'daki TÜM netlerin (ETH_TRD dahil, HDMI/DSI/CAM
+  diferansiyel çiftleri de dahil) TEK bir düz `(class kicad_default ...)`
+  bloğunda listelendiği, hiçbir P/N eşleştirme/coupling bilgisinin DSN'e
+  yazılmadığı görüldü (`grep -c "(class "` → 1). Bu, FreeRouting'in kendisi
+  mükemmel yakınsasa BİLE J1'i bağımsız tek-uçlu netler gibi routeleyeceği,
+  eşit-uzunluk/paralel-eşleşme garantisi VERMEYECEĞİ anlamına geliyor.
+- **Neden önemli:** Bu, "algoritma yetersiz" ile "araç zinciri temelden veri
+  kaybediyor" arasındaki AYRIMIN somut kanıtı — daha iyi bir router/daha
+  yüksek arama sınırı bu sorunu ÇÖZMEZ, çünkü sorun hesaplama değil, DSN
+  formatının kendisinin diferansiyel çift kavramını hiç TAŞIMAMASI. Bir
+  sonraki projede herhangi bir diferansiyel çift (USB/PCIe/MIPI/Ethernet)
+  FreeRouting'e gönderilmeden ÖNCE bu sınır hatırlanmalı — diferansiyel
+  çiftler ya `pcbnew` API'siyle doğrudan (ve `LOCKED` işaretlenerek) elle/
+  yarı-otonom çözülmeli, ya da FreeRouting'e vermeden önce net listesinden
+  ÇIKARILIP ayrı ele alınmalı.
+- **Kaynak:** `MASTER_RULEBOOK.md` FAZ 7 "FreeRouting/DSN Diferansiyel Çift
+  Sınırı", `DOCS/10_Otonomluk_Engel_Raporu.md` D1.1/D1.5,
+  `karar_birimleri.json: j1-pair-twist-cozumu` (cm4-io-test).
+
+### 2026-08-03 — cm4-io-test — `freerouting_calistir()`'in zaman-aşımı kontrolü, uzun sessiz stdout aralığında GECİKTİ
+- **Bağlam:** Aynı FreeRouting denemesinde, 259 düşük hızlı net için tam
+  board DSN'i (103KB) export edilip `freerouting_calistir(zaman_asimi_sn=240)`
+  çağrıldı.
+- **Ne oldu:** Gerçek boyutlu bu kartta (267 unrouted net + zaten routed
+  PCIe/HDMI/USB) FreeRouting 240sn içinde yakınsamadı — ama daha önemlisi,
+  fonksiyonun kendi zaman-aşımı kontrolü de zamanında TETİKLENMEDİ. Kontrol,
+  `proc.stdout.readline()`'ın (BLOCKING) her dönüşünde çalışıyor; FreeRouting
+  uzun bir süre stdout'a hiç satır yazmayınca kontrol hiç çalışma fırsatı
+  bulamadı, süreç ~285sn+ sonra elle (`Stop-Process`) sonlandırılmak zorunda
+  kaldı.
+- **Neden önemli:** "Zaman aşımı X saniye" diye belgelenen bir kontrolün
+  GERÇEKTEN o sürede tetiklendiğini varsaymak yanlış olabilir — kontrol
+  mekanizması BLOCKING bir I/O çağrısıyla aynı döngüdeyse, o I/O uzun süre
+  veri üretmediğinde kontrol de gecikir. Bir sonraki subprocess-tabanlı
+  zaman-aşımı tasarımında (özellikle uzun süre sessiz kalabilen harici
+  araçlarla) kontrol döngüsü ayrı bir thread/timer'da ya da non-blocking
+  bir okuma modeliyle kurulmalı, `readline()` gibi blocking bir çağrıya
+  GÖMÜLMEMELİ.
+- **Kaynak:** `uretim_zinciri_koprusu.py::freerouting_calistir()`,
+  `karar_birimleri.json: bulk-lowspeed-router-cozumu` (cm4-io-test), bu
+  oturumun `TEST/freerouting_scratch/` denemesi.
