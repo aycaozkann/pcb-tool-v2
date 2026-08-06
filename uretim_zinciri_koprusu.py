@@ -40,11 +40,13 @@ import hashlib
 import json
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 # ====================================================================
@@ -803,33 +805,111 @@ class DfmApiSonucu:
     uyarilar: List[str]
 
 
+def _jlcpcb_dfm_istegini_gonder(
+    gerber_zip_path: str, api_anahtari: str, endpoint_url: str, zaman_asimi_s: int,
+) -> Tuple[int, bytes]:
+    """`jlcpcb_dfm_kontrolu_gonder()`'ın GERÇEK ağ katmanı — multipart dosya
+    yükleme + Bearer token ile POST. Ayrı bir fonksiyon olmasının nedeni:
+    testler bunu (ağ gerektirdiği için) enjekte edilen bir sahte ile
+    değiştirebilsin, geri kalan fail-closed/şema mantığı gerçek koddan
+    (mock'lanmadan) çalışsın. `varlik_indir()`'deki (`cad_api_koprusu.py`)
+    "stdlib `urllib`, üçüncü parti `requests` yok" tercihiyle TUTARLI.
+    """
+    sinir = f"----jlcpcb-dfm-{hashlib.sha256(gerber_zip_path.encode()).hexdigest()[:16]}"
+    gövde_basi = (
+        f"--{sinir}\r\n"
+        f'Content-Disposition: form-data; name="gerber"; filename="gerber.zip"\r\n'
+        f"Content-Type: application/zip\r\n\r\n"
+    ).encode("utf-8")
+    govde_sonu = f"\r\n--{sinir}--\r\n".encode("utf-8")
+    with open(gerber_zip_path, "rb") as f:
+        dosya_govdesi = f.read()
+    govde = gövde_basi + dosya_govdesi + govde_sonu
+
+    istek = urllib.request.Request(
+        endpoint_url,
+        data=govde,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_anahtari}",
+            "Content-Type": f"multipart/form-data; boundary={sinir}",
+        },
+    )
+    with urllib.request.urlopen(istek, timeout=zaman_asimi_s) as yanit:  # pragma: no cover - ağ gerektirir
+        return yanit.status, yanit.read()  # pragma: no cover - ağ gerektirir
+
+
 def jlcpcb_dfm_kontrolu_gonder(
     gerber_zip_path: str,
-    api_anahtari: str,
+    api_anahtari: Optional[str],
     endpoint_url: str = "https://api.jlcpcb.com/dfm/v1/analyze",  # DOĞRULANMADI
+    zaman_asimi_s: int = 60,
+    _istek_gonder: Callable[[str, str, str, int], Tuple[int, bytes]] = _jlcpcb_dfm_istegini_gonder,
 ) -> DfmApiSonucu:
     """Gerber ZIP'ini JLCPCB'nin DFM analiz servisine gönderip JSON sonucu döndürür.
 
-    DOĞRULANMADI (bilerek): `endpoint_url`, kimlik doğrulama şeması ve yanıt
-    JSON'ının alan adları (`warnings`, `critical_count` vb. burada TAHMİNİ
-    isimlerdir) — bunların hiçbiri JLCPCB'nin resmi, herkese açık bir
-    dokümantasyonundan doğrulanmadı. Bu fonksiyonu gerçek kullanıma almadan
-    önce:
-      1. JLCPCB Online API başvurunu yap (jlcpcb.com/help/article/
-         jlcpcb-online-api-available-now).
-      2. Onaylanan hesabınla gelen resmi API dokümantasyonundaki gerçek
-         endpoint/kimlik doğrulama/şemayı buraya işle.
-      3. Şema doğrulanana kadar bu fonksiyonu ÇAĞIRMA — MASTER_RULEBOOK
-         Faz 8'in "DRC ve ERC sıfır hata" kapısı hâlâ tek güvenilir kapıdır;
-         bu fonksiyon o kapının YERİNE geçmez, sadece EK bir kontrol katmanı
-         olması PLANLANMIŞTIR.
+    `endpoint_url` ve yanıt JSON şeması (`warnings`, `criticalCount` vb.)
+    HÂLÂ DOĞRULANMADI — JLCPCB'nin resmi, herkese açık dokümantasyonundan
+    teyit edilmedi (bkz. modül başındaki DÜRÜSTLÜK NOTU). Bu fonksiyon artık
+    bir İSKELET DEĞİL — gerçek HTTP/multipart/hata-yönetimi çalışır — ama
+    `cad_api_koprusu.varlik_sorgula()`'nın "TBD"/"CONFIRM" disipliniyle AYNI
+    ilkeye uyar: gerçek bir endpoint/şema doğrulaması OLMADAN "temiz" sonucu
+    ASLA UYDURMAZ. FAIL-CLOSED davranış (hepsi `basarili=False` döner,
+    hiçbiri exception FIRLATMAZ — çağıran taraf `dfm_uyarilarini_degerlendir()`
+    ile tek tip kontrol edebilsin diye):
+      - `api_anahtari` yoksa (`None`/boş): istek hiç gönderilmez.
+      - Ağ hatası/timeout (`urllib.error.URLError`, `socket.timeout`): yakalanır.
+      - HTTP durumu 200 değilse: `basarili=False`.
+      - Yanıt geçerli JSON değilse veya beklenen alanlar (`warnings`,
+        `criticalCount`) eksikse: şema uyuşmazlığı olarak raporlanır — bu
+        alan adları TAHMİNİDİR, gerçek şema onaylı bir hesapla teyit
+        edilmeli; o güne kadar bu dal "büyük ihtimalle hiç tetiklenmeyecek"
+        değil, "muhtemelen HER ZAMAN tetiklenecek" bir güvenlik ağıdır.
     """
-    raise NotImplementedError(
-        "JLCPCB DFM API entegrasyonu doğrulanmadı — endpoint/kimlik "
-        "doğrulama/yanıt şeması gerçek API dokümantasyonuyla teyit edilip "
-        "bu fonksiyon doldurulmadan çağrılmamalı. Alternatif: Faz 8'deki "
-        "yerel `fabrika_dfm_kontrolu()` (pcb_stackup_planner.py) ve/veya "
-        "jlcdfm.com'a Gerber'i elle yükleyip sonucu okuma."
+    if not api_anahtari:
+        return DfmApiSonucu(
+            basarili=False, ham_yanit={}, kritik_uyari_sayisi=0,
+            uyarilar=["api_anahtari verilmedi — istek gönderilmedi (fail-closed, ağa hiç çıkılmadı)."],
+        )
+
+    try:
+        durum_kodu, gövde_bytes = _istek_gonder(gerber_zip_path, api_anahtari, endpoint_url, zaman_asimi_s)
+    except (urllib.error.URLError, OSError, TimeoutError) as hata:
+        return DfmApiSonucu(
+            basarili=False, ham_yanit={}, kritik_uyari_sayisi=0,
+            uyarilar=[f"JLCPCB DFM isteği başarısız (ağ/offline): {hata}"],
+        )
+
+    if durum_kodu != 200:
+        return DfmApiSonucu(
+            basarili=False, ham_yanit={"http_durum": durum_kodu}, kritik_uyari_sayisi=0,
+            uyarilar=[f"JLCPCB DFM API HTTP {durum_kodu} döndürdü (200 bekleniyordu)."],
+        )
+
+    try:
+        yanit_json = json.loads(gövde_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as hata:
+        return DfmApiSonucu(
+            basarili=False, ham_yanit={}, kritik_uyari_sayisi=0,
+            uyarilar=[f"JLCPCB DFM yanıtı geçerli JSON değil: {hata}"],
+        )
+
+    if "warnings" not in yanit_json or "criticalCount" not in yanit_json:
+        return DfmApiSonucu(
+            basarili=False, ham_yanit=yanit_json, kritik_uyari_sayisi=0,
+            uyarilar=[
+                "JLCPCB DFM yanıt şeması beklenenle (warnings/criticalCount, "
+                "TAHMİNİ alan adları) eşleşmedi — gerçek şema onaylı bir "
+                "JLCPCB hesabıyla teyit edilmeli. Yanıt sessizce 'temiz' "
+                "sayılmadı."
+            ],
+        )
+
+    kritik_sayisi = int(yanit_json["criticalCount"])
+    uyarilar = list(yanit_json["warnings"])
+    return DfmApiSonucu(
+        basarili=(kritik_sayisi == 0), ham_yanit=yanit_json,
+        kritik_uyari_sayisi=kritik_sayisi, uyarilar=uyarilar,
     )
 
 
