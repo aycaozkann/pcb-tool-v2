@@ -17,19 +17,17 @@
 
 ## D1 — Gerçek kod engelleri (NotImplementedError / eksik altyapı)
 
-### D1.1 FreeRouting zinciri — KiCad 10'da kullanılamaz
-- **`uretim_zinciri_koprusu.py:128`** — `dsn_disa_aktar()` `FreeRoutingDesteklenmiyorHatasi` fırlatıyor.
-- **Doğrulanmış gerekçe (kod içi dokümantasyon, satır 103-112):** KiCad 10 `kicad-cli pcb export` alt komutları `3dpdf, brep, drill, dxf, gencad, gerbers, glb, hpgl, ipc2581, ipcd356, odb, pdf, ply, pos, ps, stats, step, stl, stpz, svg, u3d, vrml, xao` — **`dsn` yok**.
-- Aynı engel zinciri: `freerouting_calistir()` (satır 192), `ses_iceri_aktar()` (satır 229) — hepsi `FreeRoutingDesteklenmiyorHatasi`.
-- **Sonuç:** `router=freerouting` seçeneği fiilen ölü; `pcb-layout SKILL.md:177` bunu açıkça NEEDS_HUMAN işaretliyor.
-- **Otonom çözüm seçenekleri:**
-  1. DSN'i kendimiz üret (KiCad 6/7 Specctra DSN formatını `.kicad_pcb`'den üreten yerli bir exporter yaz).
-  2. FreeRouting'i tamamen devre dışı bırak ve otonom Python router'ı (zaten var: `otonom_kurtarma_motoru.py` + `otonom_python_router.py`) tek doğrulama kaynağı yap.
-  3. Güncel FreeRouting'in `.kicad_pcb`'yi doğrudan okumasını doğrula (kod içi not satır 120-122: DOĞRULANMADI).
+### D1.1 FreeRouting/DSN zinciri — **ÇÖZÜLDÜ** (2026-07-31, GÖREV 10; bu oturumda yeniden doğrulandı)
+- **Eski durum (artık geçersiz):** `dsn_disa_aktar()` her zaman `FreeRoutingDesteklenmiyorHatasi` fırlatıyordu çünkü `kicad-cli pcb export` DSN desteklemiyor (bu tespit hâlâ DOĞRU — `dsn` alt komutu yok).
+- **Çözüm (bkz. `DOCS/12_FreeRouting_Fizibilite.md`):** `kicad-cli` desteklemese de KiCad 10.0.4'ün gömülü Python'undaki `pcbnew.ExportSpecctraDSN()` / `pcbnew.ImportSpecctraSES()` DSN/SES'i gerçekten üretip okuyabiliyor. `uretim_zinciri_koprusu.py`'de `dsn_disa_aktar()` (satır 221), `freerouting_calistir()` (satır 261), `ses_iceri_aktar()` (satır 371) artık bu gerçek API'yi `pcbnew_scripti_calistir()` üzerinden çağırıyor; `KICAD10_DSN_DESTEKLENIYOR = True` (satır 125). `pcbnew` bulunamazsa fail-closed (`FreeRoutingDesteklenmiyorHatasi`) davranışı KORUNUYOR — sessizce "çalışır" varsayılmıyor.
+- **Bu oturumda yeniden doğrulandı:** `test_uretim_zinciri_freerouting.py` → 20/20 PASS. Ayrıca gerçek `dsn_disa_aktar()` çağrısı `cm4_io_test.kicad_pcb` (gerçek, üretimdeki board) üzerinde çalıştırıldı → `basarili=True`, 103 KB geçerli `.dsn` üretildi (2008 satır, `F.Cu`/`In1.Cu`/... katman yapısı doğru parse edildi) — sentetik değil, gerçek board kanıtı.
+- **Kalan açık nokta (E2, kapsam dışı bırakıldı):** SES import'un FreeRouting çıktısı padstack'leriyle eşleşme duyarlılığı DOCS/12'de ayrı bir bilinen risk olarak kayıtlı; `router=freerouting` seçeneği artık fiilen ölü DEĞİL ama gerçek boyutlu kartlarda FreeRouting'in kendisi yavaş kalabilir (DOCS/12 E1) — bu, D1.1'in kapsamı değil, kullanım zamanı riski.
 
-### D1.2 JLCPCB DFM API — placeholder
-- **`uretim_zinciri_koprusu.py:443`** — `jlcpcb_dfm_kontrolu()` (üretim zinciri Faz 8 ek kontrolü) `NotImplementedError`.
-- **Etki:** Üretim öncesi ek DFM API katmanı planlandı ama yok; yerel `fabrika_dfm_kontrolu()` (pcb_stackup_planner.py) yedekte kalıyor. Kısmi engel.
+### D1.2 JLCPCB DFM API — **KISMİ ÇÖZÜLDÜ** (2026-08-03)
+- **Eski durum:** `jlcpcb_dfm_kontrolu_gonder()` her zaman `NotImplementedError` fırlatıyordu.
+- **Şimdiki durum:** Fonksiyon artık GERÇEK HTTP/multipart/hata-yönetimi çalıştırıyor (bkz. `test_jlcpcb_dfm.py`, 10 test) — `api_anahtari` yok/ağ hatası/timeout/HTTP≠200/bozuk JSON/beklenmeyen şema hepsi ayrı ayrı `basarili=False` ile fail-closed dönüyor, hiçbiri exception fırlatıp akışı kesmiyor ya da sessizce "temiz" saymıyor.
+- **Neden "KISMİ":** `endpoint_url` (`https://api.jlcpcb.com/dfm/v1/analyze`) ve yanıt şeması (`warnings`/`criticalCount`) HÂLÂ DOĞRULANMADI — JLCPCB'nin resmi, herkese açık, onaylı-hesap gerektirmeyen bir DFM-only endpoint dokümantasyonu bulunamadı. Gerçek kullanım için: JLCPCB Online API başvurusu yapılıp onaylanan hesaptan gelen gerçek endpoint/şema bu fonksiyona işlenmeli (`cad_api_koprusu.varlik_sorgula()`'daki "TBD" disipliniyle aynı ilke: doğrulanmamış bir şeyi asla doğrulanmış gibi sunma).
+- **Etki:** Kod artık üretime hazır bir İSKELET DEĞİL, gerçek fail-closed makine — ama gerçek JLCPCB sunucusuna karşı hiç test edilmedi (kapsam dışı, kimlik bilgisi gerektiriyor). Yerel `fabrika_dfm_kontrolu()` (pcb_stackup_planner.py) hâlâ birincil/tek doğrulanmış DFM kontrolüdür.
 
 ### D1.3 Nexar/Octopart API — placeholder
 - **`cad_api_koprusu.py:200`** — `varlik_sorgula()` (footprint/parça doğrulama) gerçek `api_token` verilirse `NotImplementedError`. `api_token=None` ise `kaynak="TBD"` ile boş sonuç döner (satır 189-199).
@@ -37,15 +35,18 @@
 - **Etki:** Gerçek stok/lifecycle/footprint verisi alınamıyor. `kaynak="TBD"` yolu sessizce devam ettiği için BOM akışı çalışıyor ama risk puanlaması gerçek dünya verisine dayanmıyor.
 - **Otonom çözüm:** API entegrasyonu yazılmalı VEYA offline bir parça veritabanı (kullanıcı tarafından doldurulan MPN+lifecycle+stok CSV) altyapıya bağlanmalı.
 
-### D1.4 pcbnew altyapı bağımlılığı
-- **`dfm_emc_check.py:30`** — modül seviyesinde `import pcbnew`; venv'de pcbnew yok → modül hiç yüklenemiyor, DFM/EMC taraması koşulamıyor.
-- **`via_stub.py:51`** — `import pcbnew`.
-- **`pcb_carpisma_radari.py:152,318`** — fonksiyon içinde koşullu/lazy `import pcbnew` (mock ile test edilebilir kalmış).
-- **`pcbnew_koprusu.py`** (satır 27, 85, 142, 180, 220, 255, 283, 349) — `import pcbnew`; modül kendisi "pcbnew yok" senaryosu için yazılmış.
-- **`topolojik_router_koprusu.py:593`** — lazy `import pcbnew`.
-- **Çözüm:** KiCad 10'un Python'unu kullanmak (`C:\Program Files\KiCad\10.0\bin\python.exe`) veya pcbnew bağımlılığını lazy/opsiyonel yapıp `.kicad_pcb` metin ayrıştırma yoluna düşmek.
+### D1.4 pcbnew altyapı bağımlılığı — **KISMİ ÇÖZÜLDÜ** (2026-08-03, Madde 5)
+- **`via_stub.py:51`** — ESKİDEN modül seviyesinde `import pcbnew` vardı (dosya hiç import EDİLEMİYORDU, testsizdi). ÇÖZÜLDÜ: import artık `canonical_layer_name()` içinde lazy; `main()` `ImportError`'ı yakalayıp `NO_COVERAGE` (exit 0, dosyanın kendi "kardeş araç sözleşmesi") döndürüyor, ham exception sızmıyor. Bkz. `test_via_stub.py` (9 test — YENİ dosya, önceden bu modülün HİÇ testi yoktu).
+- **`pcbnew_koprusu.py`** — `via_in_pad_kontrolu`/`annular_ring_kontrolu`/`kenar_keepout_seramik_kontrolu`/`stitch_yogunlugu_kontrolu` (hepsi `board_path` alıp `Bulgu` döndüren dört fonksiyon) artık ortak `_pcbnew_veya_kapsam_yok()` yardımcısından geçiyor: `ImportError` → KAPSAM_YOK `Bulgu` (crash değil). Bkz. `TestPcbnewYokFallback` (`test_pcbnew_koprusu.py`, 4 yeni test, autouse mock BİLEREK kaldırılıp gerçek `ModuleNotFoundError` ile test edildi).
+- **`otonom_python_router.py`** — İNCELENDİ, DÜZELTME GEREKMEDİ: dosyanın kendisi hiç `pcbnew` import ETMİYOR (arama saf Python); yazma katmanı `duz_izleri_pcbnew_ile_yaz()` zaten `topolojik_router_koprusu.TopolojikRouter`'a delege ediyor, o da zaten lazy import kullanıyor (satır 593, kapsam dışı — dokunulmadı).
+- **`mcad_carpisma_koprusu.py`** — İNCELENDİ, DÜZELTME GEREKMEDİ: dosya hiç `pcbnew` bağımlılığı taşımıyor, kasıtlı olarak saf regex/metin ayrıştırma kullanıyor (`.kicad_pcb`'den yerleşim çıkarımı — bkz. dosyanın 124-177. satırları).
+- **Neden "KISMİ":** `dfm_emc_check.py:30`'daki modül seviyesi `import pcbnew` ayrı bir görevde `via_stub.py` ile AYNI desenle (lazy import + fail-closed KAPSAM_YOK) ÇÖZÜLDÜ (bkz. `test_dfm_emc_check.py`). `pcb_carpisma_radari.py` hâlâ bu görevin izin verilen dosya kapsamı DIŞINDA kaldığı için dokunulmadı.
 
 ---
+
+### D1.8 IPC-7351 footprint hesaplayıcı — yalnız 2-terminal — **ÇÖZÜLDÜ** (2026-08-03, Madde 4)
+- **Eski durum:** `ipc7351_footprint.py` yalnız iki-terminalli çip komponentleri (0402/0603/0805/1206 R/C/L) destekliyordu; docstring açıkça `TBD: QFN/BGA` diyordu — çok-pinli/no-lead/BGA paketli komponentler için otomatik land-pattern hesaplanamıyordu (manuel datasheet kopyalamaya geri düşülüyordu).
+- **Çözüm:** Ortak Zmax/Gmin/Xmax çekirdeği (`_zmax_gmin_xmax_hesapla()`) çıkarılıp üç yeni fonksiyon eklendi: `gullwing_land_pattern_hesapla()` (SOIC/TSOP/QFP), `qfn_land_pattern_hesapla()` (no-lead, kendi daha küçük toe-fillet tablosuyla), `bga_land_pattern_hesapla()` (top/ball çapı oranı tabanlı, NSMD/SMD ayrımlı, TAMAMEN AYRI formül ailesi). Hepsi dosyanın kendi "sign-off için yeterli değil, kritik tasarımda çapraz doğrulanmalı" disipliniyle etiketlendi. 10 yeni test (`test_ipc7351_footprint.py`, toplam 15/15 PASS).
 
 ## D2 — İşaretli durma noktaları (`NEEDS_HUMAN` döndüren mantık)
 
@@ -191,6 +192,59 @@ kaçış) belirlenip TÜM rota boyunca SABİT tutulması yaklaşımıyla yazıld
    ilgili). 3. denemenin kodu/verisi `TEST/` içinde referans için
    duruyor, board'a UYGULANMIYOR.
 
+### D1.7 — Paylaşılan-engel-haritası sıralı A* mimarisi 100+ net'te ölçeklenmiyor — **KISMİ ÇÖZÜLDÜ (2026-08-03, aynı gün ikinci müdahale)**
+> **Kaynak:** `cm4-io-test`, 2026-08-03, Görev 3 (259 düşük hızlı net,
+> `TEST/bulk_lowspeed_router.py`) — D1.5'teki (J1, 8 net) MİMARİNİN AYNISI
+> 103 net'e genellendi.
+>
+> **Güncelleme (aynı gün, sonraki müdahale):** performans/donma alt-sorunu
+> ÇÖZÜLDÜ — yeni paylaşılan modül `TEST/bounded_astar.py` (hem
+> `bulk_lowspeed_router.py` hem `independent_net_router.py` artık bunu
+> kullanıyor) her aramaya 3 bağımsız sert sınır (düğüm/süre/bounding-box)
+> uyguluyor. **ÖNEMLİ ek bulgu:** ilk denemede kullanıcının önerdiği
+> "15.000 düğüm / 5sn" sınırı YETERSİZ çıktı — gerçek ölçümle (bkz.
+> `bounded_astar.py` başlığı) "via ile sadece aynı (x,y)'de katman
+> değiştirerek ulaşılabilen ada" topolojisinde heap'te neredeyse-yinelenen
+> düşük-maliyetli girdiler birikip 2000-5000 genişletme arasında
+> performans SERT şekilde çöküyordu (500/1000/2000 hep <0.06sn, 5000+
+> 15sn+ içinde bitmiyordu) — duvar-saati kontrolü bunu TEK BAŞINA
+> güvenilir şekilde yakalayamadı (kök neden tam izole edilemedi, muhtemelen
+> heap'in anlık iç boyutu ölçümlerin gösterdiğinden çok daha büyük şişip
+> inceliyor). Sınır ampirik olarak 2000 düğüm/3sn'ye düşürülüp AYNI
+> patolojik senaryoda gerçekten hızlı kaldığı ÖLÇÜLEREK doğrulandı (8/8
+> `test_bounded_astar.py` testi PASS, 1.37sn). **Hâlâ ÇÖZÜLMEDİ:** düşük
+> node sınırı, gerçek routing BAŞARI ORANINI düşürüyor (103 net'ten sadece
+> 9'u routelanabildi, geri kalanı GÜVENLİ ama hızlı "expansions" ile
+> UNROUTED) — J1/J2 konnektör-satırlarına otomatik dik-kaçış (aşağıdaki
+> "Otonom çözüm" maddesi (a)) HALA UYGULANMADI, bu yüzden asıl routing
+> başarı sorunu (D1.7'nin (2) doğruluk kısmı, GND-hariç) `cm4-io-test/
+> DOCS/karar_birimleri.json: bulk-lowspeed-router-cozumu` altında AÇIK
+> kalmaya devam ediyor. Ayrıca Değişiklik 4 (koşullu görsel teşhis,
+> `TEST/visual_diagnostic.py`) eklendi — bir net sert sınıra takılınca
+> ilk birkaç örnek için otomatik render + Claude'un kendi vision'ıyla
+> yazılmış analiz üretiyor (`TEST/gorsel_teshis_*.md`), GERÇEKTEN J1/J2
+> satırı yakınlığını görsel olarak doğruladı.
+
+8 net'te (D1.5) yönetilebilir olan "her net önceki TÜM netleri gerçek engel
+sayar" mimarisi, 103 net'te İKİ AYRI şekilde başarısız oldu: (1) **performans**
+— board doldukça "yol yok" durumları O(kart-boyutu) tam-tarama gerektiriyor,
+20/103 net'te 433sn'den sınırsıza çıktı (sabit adım/süre sınırı + bounding-box
+ile giderildi); (2) **doğruluk** — GND/net'siz pedlerin engel modelinden
+kazara dışlanması (58/58 net'te shorting) ve J1/J2 satırlarına dik-kaçış
+uygulanmaması (14/27 net'te shorting) — ikisi de "temiz" görünen bir
+başarı sayısının ARKASINDA gerçek kısa devre taşıyabileceğini gösterdi;
+HER seferinde board'a yazmadan/yazdıktan hemen sonra GERÇEK DRC ile
+doğrulanmadan "N/103 routed" çıktısı asla "N net temiz" sayılmamalı.
+**Otonom çözüm:** genel amaçlı bir `pcb-tool-v2` modülü (`coupled_pair_router.py`
+veya benzeri, D1.5'teki öneriyle birleşik) şunları İÇERMELİ: (a) her
+konnektör-satırı pinine otomatik dik-kaçış (pitch'ten bağımsız, satırdaki
+pin sayısından bağımsız), (b) GND/net'siz pedlerin HER ZAMAN gerçek engel
+sayılması (asla "zone bloklar" gerekçesiyle istisna edilmemesi), (c) net
+sayısı arttıkça performansın board-boyutuyla DEĞİL, gerçek arama
+alanıyla ölçeklenmesi (bounding-box + adım/süre sınırı ZORUNLU, opsiyonel
+değil). Kayıt: `cm4-io-test/DOCS/karar_birimleri.json:
+bulk-lowspeed-router-cozumu` (durum: ACIK).
+
 ### D1.6 — `PCB_VIA.GetWidth()` katman argümanı olmadan çağrılırsa GUI assert pop-up'ı
 > **Kaynak:** Kullanıcı raporu, 2026-08-03 — KiCad 10'da gerçek bir debug
 > assert pop-up'ı ("GetWidth called without a layer argument") headless bir
@@ -221,20 +275,21 @@ eklenmedi, bu D1.6 kaydı o eklemenin YERİNE geçmiyor, sadece bulguyu tutuyor)
 
 | # | Engel | Dosya:satır | Etki | Zorluk |
 |---|-------|-------------|------|--------|
-| 1 | pcbnew yüklenemiyor | dfm_emc_check.py:30, via_stub.py:51, pcbnew_koprusu.py | DFM/EMC, gerçek-board, yerleşim radarı çalışmıyor | Düşük (KiCad 10 Python'u) |
+| 1 | pcbnew yüklenemiyor | via_stub.py (**ÇÖZÜLDÜ**), pcbnew_koprusu.py (**ÇÖZÜLDÜ**), dfm_emc_check.py (**ÇÖZÜLDÜ**) | Üçü de artık KAPSAM_YOK ile fail-closed; `pcb_carpisma_radari.py` hâlâ kapsam dışı | Yok |
 | 2 | routing_plan.md onayı | CLAUDE.md:689-691, pcb-layout SKILL.md:182 | Routing başlayamaz | Politika değişikliği |
-| 3 | FreeRouting DSN yok | uretim_zinciri_koprusu.py:128 | Freerouting router'ı ölü | Orta (DSN exporter yaz) |
+| 3 | FreeRouting DSN yok | **ÇÖZÜLDÜ** (bkz. D1.1) | — | — |
 | 4 | 3-kez tekrar → NEEDS_HUMAN | CLAUDE.md:682-688, otonom_kurtarma_motoru.py:285 | Zor yerleşimde durur | Karar mantığı değişimi |
 | 5 | Nexar/Octopart placeholder | cad_api_koprusu.py:200, bom_lifecycle_koprusu.py:90 | Stok/lifecycle verisi yok | Orta (offline DB + CSV) |
-| 6 | KAPSAM_YOK → NEEDS_HUMAN | ipc6012_dfm_motoru.py:270, ipc_a_610_dfa_motoru.py:350, emi_emc_kural_motoru.py:323 | Veri eksikliğinde durur | D1.4 çözülürse çoğu düşer |
-| 7 | JLCPCB DFM API placeholder | uretim_zinciri_koprusu.py:443 | Ek DFM katmanı yok | Düşük (yerel yedek var) |
+| 6 | KAPSAM_YOK → NEEDS_HUMAN | ipc6012_dfm_motoru.py:270, ipc_a_610_dfa_motoru.py:350, emi_emc_kural_motoru.py:323 | Veri eksikliğinde durur | D1.4 kısmen çözüldü, bazıları düşmüş olabilir |
+| 7 | JLCPCB DFM API placeholder | **KISMİ ÇÖZÜLDÜ** (bkz. D1.2) — gerçek fail-closed ağ kodu var, endpoint/şema doğrulanmadı | Ek DFM katmanı artık gerçek (test edilmemiş endpoint'e karşı) | Kalan: JLCPCB hesabıyla endpoint/şema teyidi |
+| 8 | CI yok — regresyonlar ancak elle `pytest` çalıştırılırsa yakalanıyordu | **ÇÖZÜLDÜ**: `.github/workflows/ci.yml` (push/PR'da uv sync + py_compile + pytest -q + orkestrasyon duman testi) | Regresyonlar artık her push/PR'da otomatik yakalanır | — |
 
-### Önerilen uygulama sırası (bağımlılık zinciri)
-1. **D1.4 → pcbnew'u KiCad 10 Python'una bağla** (DFM/EMC + gerçek-board + yerleşim radarı + KAPSAM_YOK kaynağı birden çözülür; D2.2 ve D2.5'in büyük kısmı düşer).
-2. **D3.1/5 + D3.2 → routing_plan.md onayını "otomatik onay (audit log)" modeline çevir** — rapor yine üretilir, ama beklenmez; topoloji değişikliği loglanır.
-3. **D2.4 + D2.6 → 3-kez tekrar kuralını "belgeli otonom karar"a çevir** — denemeler + gerekçe rapora yazılır, durmaz.
-4. **D1.1 → ya DSN exporter yaz ya da FreeRouting'i resmen kapat** (SKILL.md'deki `router=freerouting` seçeneğini python/manuel-diffpair'e sabitle).
-5. **D1.3 → offline parça veritabanı (CSV) altyapısı** ekle; nexar opsiyonel kalır.
-6. **D2.1, D2.3, D3.1/2, D3.4 → stoksuz+bilinçli topoloji ödünlerini "uyarı + rapora işle" olarak otonomlaştır.**
+### Önerilen uygulama sırası (bağımlılık zinciri) — 2026-08-03 GÜNCELLEMESİ
+1. ~~D1.4 → pcbnew'u KiCad 10 Python'una bağla~~ **YAPILDI**: `via_stub.py`/`pcbnew_koprusu.py`/`dfm_emc_check.py` artık üçü de lazy-import + KAPSAM_YOK fallback kullanıyor (`_pcbnew_veya_kapsam_yok()`); kalan tek dosya `pcb_carpisma_radari.py` ayrı bir görevde ele alınmalı.
+2. **D3.1/5 + D3.2 → routing_plan.md onayını "otomatik onay (audit log)" modeline çevir** — rapor yine üretilir, ama beklenmez; topoloji değişikliği loglanır. (Hâlâ açık.)
+3. **D2.4 + D2.6 → 3-kez tekrar kuralını "belgeli otonom karar"a çevir** — denemeler + gerekçe rapora yazılır, durmaz. (Hâlâ açık — ama `karar_birimleri.py` altyapısı artık MEVCUT, bu maddeyi uygulamak eskisinden kolay.)
+4. ~~D1.1 → ya DSN exporter yaz ya da FreeRouting'i resmen kapat~~ **ÇÖZÜLDÜ** (2026-07-31 GÖREV 10 + bu oturumda yeniden doğrulandı, bkz. D1.1).
+5. **D1.3 → offline parça veritabanı (CSV) altyapısı** ekle; nexar opsiyonel kalır. (Hâlâ açık.)
+6. **D2.1, D2.3, D3.1/2, D3.4 → stoksuz+bilinçli topoloji ödünlerini "uyarı + rapora işle" olarak otonomlaştır.** (Hâlâ açık.)
 
 > **Saklanması önerilenler:** Faz 0 belirsiz gereksinim (sensör çözümlemeden tasarım yapmak tehlikeli) ve design-checker FAIL durumu — bunlar otonom karara devredilirken bile "dokümante edilmiş karar" olmalıdır; birebir kaldırılmamalıdır.
