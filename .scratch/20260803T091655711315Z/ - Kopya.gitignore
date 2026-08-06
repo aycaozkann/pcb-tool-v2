@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Obsidian workspace cache (her makinede yeniden oluşur)
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# KiCad temp & backup files
+*.bak
+*.bck
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*-backups/
+_autosave-*
+*.tmp
+*.zip
+
+# Sadece onaylı üretim çıktılarını tutmak için temp üretim klasörleri
+temp_gerbers/

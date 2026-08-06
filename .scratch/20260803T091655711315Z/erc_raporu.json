@@ -1,0 +1,166 @@
+{
+    "$schema": "https://schemas.kicad.org/erc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-08-03T08:21:22",
+    "ignored_checks": [
+        {
+            "description": "Global label only appears once in the schematic",
+            "key": "single_global_label"
+        },
+        {
+            "description": "Four connection points are joined together",
+            "key": "four_way_junction"
+        },
+        {
+            "description": "SPICE model issue",
+            "key": "simulation_model_issue"
+        },
+        {
+            "description": "Assigned footprint doesn't match footprint filters",
+            "key": "footprint_filter"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning"
+    ],
+    "kicad_version": "10.0.4",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "/26595b43-0773-4c7c-9f0c-d36ce2f9efbd",
+            "violations": [
+                {
+                    "description": "'USBLC6-2SC6' sembolü 'Power_Protection' kütüphanesindeki kopyayla eşleşmiyor",
+                    "items": [
+                        {
+                            "description": "SembollerD2 [USBLC6-2SC6]",
+                            "pos": {
+                                "x": 0.1778,
+                                "y": 0.5334
+                            },
+                            "uuid": "ef2630f3-4c97-45d2-8ca4-5600d4ef609c"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "Bidirectional ve Power output tipi pimler bağlı",
+                    "items": [
+                        {
+                            "description": "Symbol U2 Pin 1 [AP_AD0, Bidirectional, Line]",
+                            "pos": {
+                                "x": 0.7239,
+                                "y": 1.6637
+                            },
+                            "uuid": "8e76c026-c226-4a25-b7ca-a3361ecb965e"
+                        },
+                        {
+                            "description": "Symbol #FLG02 Pin 1 [Power output, Line]",
+                            "pos": {
+                                "x": 1.1176,
+                                "y": 0.3048
+                            },
+                            "uuid": "b18cf1db-bae0-492a-94c5-5b64bb3aa96b"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "pin_to_pin"
+                },
+                {
+                    "description": "Label connected to only one pin",
+                    "items": [
+                        {
+                            "description": "'TP_GPIO3' etiketi",
+                            "pos": {
+                                "x": 0.889,
+                                "y": 0.3429
+                            },
+                            "uuid": "f5b7263a-8cf8-4947-bf74-ba36da03f471"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "isolated_pin_label"
+                },
+                {
+                    "description": "Label connected to only one pin",
+                    "items": [
+                        {
+                            "description": "'TP_U0TXD' etiketi",
+                            "pos": {
+                                "x": 0.889,
+                                "y": 0.5207
+                            },
+                            "uuid": "445f4c89-c52c-404a-a634-c2d9f15c3511"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "isolated_pin_label"
+                },
+                {
+                    "description": "Label connected to only one pin",
+                    "items": [
+                        {
+                            "description": "'TP_U0RXD' etiketi",
+                            "pos": {
+                                "x": 0.889,
+                                "y": 0.5461
+                            },
+                            "uuid": "9fd89dc2-bcec-450d-a849-c2c31a067294"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "isolated_pin_label"
+                },
+                {
+                    "description": "Bidirectional ve Power output tipi pimler bağlı",
+                    "items": [
+                        {
+                            "description": "Symbol U1 Pin 7 [CHIP_EN, Bidirectional, Line]",
+                            "pos": {
+                                "x": 1.3462,
+                                "y": 0.3683
+                            },
+                            "uuid": "675d292e-9369-44ae-a190-c074df68cfdf"
+                        },
+                        {
+                            "description": "Symbol U4 Pin 5 [VOUT, Power output, Line]",
+                            "pos": {
+                                "x": 0.5715,
+                                "y": 1.8415
+                            },
+                            "uuid": "98f9e5ee-12d4-4200-b8ee-07ad0738b10a"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "pin_to_pin"
+                },
+                {
+                    "description": "Hem +3V3 aynı zamanda CHIP_EN aynı ögelere bağlı; ağ listesinde +3V3 kullanılacak",
+                    "items": [
+                        {
+                            "description": "'+3V3' etiketi",
+                            "pos": {
+                                "x": 0.4445,
+                                "y": 1.6637
+                            },
+                            "uuid": "0559c087-cc31-49eb-91db-51c940d8e122"
+                        },
+                        {
+                            "description": "'CHIP_EN' etiketi",
+                            "pos": {
+                                "x": 2.0828,
+                                "y": 1.524
+                            },
+                            "uuid": "22a07dfa-5bf6-40d9-9f72-4a53beeef5a6"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "multiple_net_names"
+                }
+            ]
+        }
+    ],
+    "source": "ESP32C3_SmartBand.kicad_sch"
+}

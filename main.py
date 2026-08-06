@@ -559,6 +559,34 @@ def cmd_coklu_kart_dogrula(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_envanter_guncelle(args: argparse.Namespace) -> int:
+    """`yetenek_envanteri_uret.py`'yi CLI'ye bağlar — repo'daki her
+    modülün Durum/Test/Gerçek-Mock/Araç Zinciri Uyumu bilgisini tarayıp
+    `YETENEK_ENVANTERI.xlsx`'i yeniden üretir.
+
+    Otomatik bir git hook'una BİLEREK BAĞLANMADI (bkz. `yetenek_envanteri_
+    uret.py` başlığı) — bu projenin genel disiplini her adımın commit'inin
+    ELLE/bilinçli yapılmasıdır. `KURULUM.md`'de bu bayrağın oturum sonunda
+    elle çağrılması gerektiği not düşüldü."""
+    import yetenek_envanteri_uret as yeu
+
+    repo_kok = Path(args.repo_dizini).resolve()
+    test_sonuclari = None if args.testleri_atla else yeu.tum_testleri_calistir_ve_sonuclari_topla(repo_kok)
+    kayitlar = yeu.repo_taramasi_yap(repo_kok, test_sonuclari)
+
+    cikti_yolu = Path(args.cikti)
+    if not cikti_yolu.is_absolute():
+        cikti_yolu = repo_kok / cikti_yolu
+    yeu.excel_uret(kayitlar, cikti_yolu)
+
+    print(f"\n=== YETENEK ENVANTERİ: {len(kayitlar)} modül tarandı ===")
+    print(f"  Yazıldı: {cikti_yolu}")
+    kontrol_edilmesi_gereken = [k.modul_adi for k in kayitlar if k.gercek_mi_mock_mu == "KONTROL EDİLMELİ"]
+    if kontrol_edilmesi_gereken:
+        print(f"  KONTROL EDİLMELİ ({len(kontrol_edilmesi_gereken)}): {', '.join(kontrol_edilmesi_gereken)}")
+    return 0
+
+
 def cmd_sistem_atama_plani_uret(args: argparse.Namespace) -> int:
     """`sistem_orkestratoru.py`'yi CLI'ye bağlar — 6 kamera kartı için VC ID
     + deserializer I2C adres-çevirisi planını hesaplar, doğrular, ve
@@ -995,6 +1023,18 @@ def build_parser() -> argparse.ArgumentParser:
     anahat.add_argument("--proje-dizini", dest="proje_dizini", required=True, help="proje kök dizini (yerlesim_veri.json'ın bulunduğu yer)")
     anahat.add_argument("--dxf-yolu", dest="dxf_yolu", required=True, help="mekanik board anahat DXF dosyasının yolu")
     anahat.set_defaults(func=cmd_anahat_degisti_yeniden_yerlestir)
+
+    envanter = sub.add_parser(
+        "envanter-guncelle",
+        help="repo'daki her modülü tarayıp YETENEK_ENVANTERI.xlsx'i yeniden üretir (yetenek_envanteri_uret.py)",
+    )
+    envanter.add_argument("--repo-dizini", dest="repo_dizini", default=".", help="repo kök dizini (varsayılan: .)")
+    envanter.add_argument("--cikti", default="YETENEK_ENVANTERI.xlsx", help="çıktı .xlsx dosya adı/yolu")
+    envanter.add_argument(
+        "--testleri-atla", dest="testleri_atla", action="store_true",
+        help="tam suite'i çalıştırmayı atla (hızlı ama Test Durumu='olculemedi' kalır)",
+    )
+    envanter.set_defaults(func=cmd_envanter_guncelle)
 
     return ap
 

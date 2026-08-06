@@ -1,0 +1,29 @@
+# .gitattributes — KiCad dosyalarının Git diff/merge davranışını düzeltir.
+#
+# NEDEN: KiCad 6+ dosyaları (.kicad_sch/.kicad_pcb/.kicad_pro) düz metin
+# S-Expression formatındadır — Git bunları doğru diff'leyebilir AMA satır
+# sonu normalizasyonu (CRLF/LF) olmadan gereksiz "her satır değişti" gürültüsü
+# üretir. Üretim çıktıları (Gerber/PDF/zip) ise BİNARY sayılmalı — aksi halde
+# Git bunları da metin gibi diff'lemeye çalışıp anlamsız/kocaman diff üretir.
+
+# KiCad kaynak dosyaları — metin, LF ile normalize et
+*.kicad_sch text eol=lf
+*.kicad_pcb text eol=lf
+*.kicad_pro text eol=lf
+*.kicad_sym text eol=lf
+*.kicad_mod text eol=lf
+*.kicad_dru text eol=lf
+
+# Üretim/rapor çıktıları — binary, diff üretme (repoya commit edilecekse bile)
+*.gbr binary
+*.gbrjob binary
+*.drl binary
+*.zip binary
+*.pdf binary
+*.png binary
+*.svg -diff
+*.step binary
+
+# Python
+*.py text eol=lf
+*.md text eol=lf
