@@ -48,8 +48,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import pcbnew
-
 MM = 1e6
 C_MPS = 299_792_458.0
 
@@ -233,7 +231,18 @@ def track_touches(track, pos) -> bool:
 
 
 def canonical_layer_name(layer_id: int) -> str:
-    """Özel kullanıcı adı (örn. GND1) yerine stackup'taki In1.Cu adını ver."""
+    """Özel kullanıcı adı (örn. GND1) yerine stackup'taki In1.Cu adını ver.
+
+    `import pcbnew` BİLEREK burada, fonksiyon içinde (2026-08-03, Madde 5):
+    eskiden modül seviyesindeydi, yani `import via_stub` (örn. bir testte
+    veya orkestrasyon kodunda) pcbnew kurulu olmayan HER ortamda anında
+    `ModuleNotFoundError` ile çökerdi — dosyanın geri kalanı hiç
+    çalıştırılamadan. `pcbnew_koprusu.py`'nin lazy-import deseniyle AYNI
+    disiplin: modül HER ZAMAN import edilebilir, pcbnew'e ihtiyaç YALNIZCA
+    gerçekten çağrıldığında ortaya çıkar (ve `main()`'de fail-closed
+    NO_COVERAGE olarak yakalanır, ham `ModuleNotFoundError` sızmaz)."""
+    import pcbnew
+
     return str(pcbnew.LayerName(layer_id))
 
 
@@ -361,6 +370,29 @@ def main(argv=None):
         bw_source = "--data-rate-gbps'ten f_knee=data_rate/2 (NRZ Nyquist modeli)"
     else:
         channel_bw, bw_source = None, "verilmedi"
+
+    try:
+        import pcbnew
+    except ImportError as exc:
+        # Madde 5 (2026-08-03): pcbnew kurulu değilse sessiz crash yerine
+        # NO_COVERAGE ile fail-closed rapor — dosyanın kendi "kardeş araç
+        # sözleşmesi" (NO_COVERAGE exit-code 0 olabilir, çağıran özet
+        # sayacına bakmalı) burada da uygulanır.
+        findings = [Finding("via_stub_resonance", "NO_COVERAGE", 0, [],
+                            f"pcbnew modülü bulunamadı ({exc}) — bu kontrol KiCad'in "
+                            "gömülü Python'unda çalıştırılmalı; sessizce PASS/çökme "
+                            "yerine NO_COVERAGE raporlandı.")]
+        out = {
+            "board": a.board, "channel_bw_ghz": channel_bw, "bandwidth_source": bw_source,
+            "bw_margin": a.bw_margin, "dk_override": a.dk, "checks": findings,
+            "summary": {s: sum(1 for f in findings if f["status"] == s)
+                        for s in ("PASS", "FAIL", "NO_COVERAGE")},
+        }
+        text = json.dumps(out, indent=2, ensure_ascii=False, allow_nan=False)
+        if a.json:
+            Path(a.json).write_text(text + "\n", encoding="utf-8")
+        print(text)
+        return 0
 
     board = pcbnew.LoadBoard(a.board)
     stackup, stack_status = parse_stackup(a.board)
